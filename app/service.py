@@ -1,4 +1,7 @@
 import logging
+import re
+import secrets
+import string
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -8,11 +11,23 @@ from .catalog import Catalog, public_inputs, resolve_inputs
 from .config import Settings
 from .db import RECONCILER_LOCK_ID, Database, NameTaken
 from .models import Lab, LabCreate, LabStatus
+from .identity import Caller
+from .openbao import OpenBaoClient
 from .terrakube import JOB_FAILED, JOB_SUCCEEDED, Terrakube
 
 log = logging.getLogger(__name__)
 
 TTL_POLICY = "ttl-policy"
+NAME_ATTEMPTS = 5
+_ALPHABET = string.ascii_lowercase + string.digits
+
+
+def random_name(owner_email: str) -> str:
+    """`<owner>-<5 random chars>`, e.g. jwolynko-k3x9p; always matches NAME_PATTERN."""
+    slug = re.sub(r"[^a-z0-9]+", "-", owner_email.split("@")[0].lower()).strip("-")[:20].rstrip("-")
+    if not slug or not slug[0].isalpha():
+        slug = f"lab-{slug}".rstrip("-")[:20].rstrip("-")
+    return f"{slug}-{''.join(secrets.choice(_ALPHABET) for _ in range(5))}"
 LIVE = {LabStatus.pending, LabStatus.provisioning, LabStatus.ready, LabStatus.failed, LabStatus.destroy_failed}
 
 
@@ -29,8 +44,12 @@ def now() -> datetime:
 
 
 class LabService:
-    def __init__(self, settings: Settings, catalog: Catalog, db: Database, terrakube: Terrakube):
+    def __init__(
+        self, settings: Settings, catalog: Catalog, db: Database, terrakube: Terrakube,
+        access_store: OpenBaoClient | None = None,
+    ):
         self.settings, self.catalog, self.db, self.terrakube = settings, catalog, db, terrakube
+        self.access_store = access_store
 
     def to_model(self, row: dict[str, Any]) -> Lab:
         template = self.catalog.get(row["template_id"])
@@ -42,9 +61,21 @@ class LabService:
             raise LabError(404, "lab not found")
         return row
 
+    async def get_owned(self, lab_id: UUID, caller: Caller) -> dict[str, Any]:
+        """The lab if the caller owns it or is an admin; otherwise 404, so other users' labs stay invisible."""
+        row = await self.get(lab_id)
+        if not caller.admin and row["owner_email"].lower() != caller.email:
+            raise LabError(404, "lab not found")
+        return row
+
     # --- create ------------------------------------------------------------
 
-    async def create(self, request: LabCreate, actor: str | None) -> dict[str, Any]:
+    async def create(self, request: LabCreate, caller: Caller) -> dict[str, Any]:
+        owner = (request.owner_email or caller.email).lower()
+        if owner != caller.email and not caller.admin:
+            raise LabError(403, "only admins can create labs for another owner")
+        request = request.model_copy(update={"owner_email": owner})
+        actor = caller.email
         template = self.catalog.get(request.template_id)
         if template is None:
             raise LabError(422, f"unknown template {request.template_id!r}")
@@ -57,18 +88,12 @@ class LabService:
 
         lab_id = uuid.uuid4()
         created = now()
-        try:
-            await self.db.insert_lab(
-                lab_id=lab_id, name=request.name, template_id=template.id, owner_email=request.owner_email,
-                inputs=values, expires_at=created + timedelta(hours=ttl), actor=actor,
-            )
-        except NameTaken:
-            raise LabError(409, f"a lab named {request.name!r} already exists") from None
+        name = await self._insert(request, lab_id, template.id, values, created + timedelta(hours=ttl), actor)
 
         workspace_id: str | None = None
         try:
             workspace_id = await self.terrakube.create_workspace(
-                name=f"lab-{request.name}",
+                name=f"lab-{name}",
                 description=f"{template.name} for {request.owner_email} (lab {lab_id})",
                 repository=template.source.repository,
                 branch=template.source.branch,
@@ -89,7 +114,7 @@ class LabService:
                 )
             metadata = {
                 "TF_VAR_lab_id": str(lab_id),
-                "TF_VAR_lab_name": request.name,
+                "TF_VAR_lab_name": name,
                 "TF_VAR_lab_owner": request.owner_email,
                 "TF_VAR_lab_expires_at": (created + timedelta(hours=ttl)).isoformat(),
             }
@@ -111,10 +136,31 @@ class LabService:
             event=("provision_started", actor, {"workspace_id": workspace_id, "job_id": job_id}),
         )
 
+    async def _insert(
+        self, request: LabCreate, lab_id: UUID, template_id: str, values: dict[str, str],
+        expires_at: datetime, actor: str | None,
+    ) -> str:
+        """Record the lab; a generated name is retried on the rare collision."""
+        attempts = 1 if request.name else NAME_ATTEMPTS
+        for _ in range(attempts):
+            name = request.name or random_name(request.owner_email)
+            try:
+                await self.db.insert_lab(
+                    lab_id=lab_id, name=name, template_id=template_id, owner_email=request.owner_email,
+                    inputs=values, expires_at=expires_at, actor=actor,
+                )
+                return name
+            except NameTaken:
+                continue
+        if request.name:
+            raise LabError(409, f"a lab named {request.name!r} already exists")
+        raise LabError(409, "could not generate a free lab name; retry or pass one")
+
     # --- lifecycle ---------------------------------------------------------
 
-    async def extend(self, lab_id: UUID, hours: int, actor: str | None) -> dict[str, Any]:
-        row = await self.get(lab_id)
+    async def extend(self, lab_id: UUID, hours: int, caller: Caller) -> dict[str, Any]:
+        row = await self.get_owned(lab_id, caller)
+        actor = caller.email
         if row["status"] not in {LabStatus.pending, LabStatus.provisioning, LabStatus.ready, LabStatus.failed}:
             raise LabError(409, f"cannot extend a lab in status {row['status']}")
         template = self.catalog.get(row["template_id"])
@@ -131,11 +177,52 @@ class LabService:
             raise LabError(409, "lab changed while extending; retry")
         return updated
 
-    async def destroy(self, lab_id: UUID, actor: str | None, reason: str) -> dict[str, Any]:
-        row = await self.get(lab_id)
+    async def destroy(self, lab_id: UUID, caller: Caller, reason: str) -> dict[str, Any]:
+        row = await self.get_owned(lab_id, caller)
         if row["status"] in {LabStatus.destroying, LabStatus.destroyed}:
             raise LabError(409, f"lab is already {row['status']}")
-        return await self._start_destroy(row, actor, reason)
+        return await self._start_destroy(row, caller.email, reason)
+
+    async def retry(self, lab_id: UUID, caller: Caller) -> dict[str, Any]:
+        """Run the apply again for a failed lab, e.g. after fixing its template or a permission."""
+        row = await self.get_owned(lab_id, caller)
+        if row["status"] != LabStatus.failed:
+            raise LabError(409, f"only failed labs can be retried; this one is {row['status']}")
+        if not row["workspace_id"]:
+            raise LabError(409, "nothing was created in Terrakube; destroy this lab and create a new one")
+        if row["expires_at"] <= now():
+            raise LabError(409, "lab has expired; it is being destroyed")
+        try:
+            job_id = await self.terrakube.start_job(row["workspace_id"], self.settings.terrakube_apply_template)
+        except Exception as error:
+            log.exception("retry of lab %s failed to start", lab_id)
+            raise LabError(502, f"Terrakube request failed: {error}") from error
+        updated = await self.db.update_lab(
+            lab_id, expect_status={LabStatus.failed}, status=LabStatus.provisioning, job_id=job_id,
+            status_detail="apply job queued (retry)",
+            event=("retry_requested", caller.email, {"job_id": job_id, "previous_job_id": row["job_id"]}),
+        )
+        if updated is None:
+            raise LabError(409, "lab changed while retrying; reload it")
+        return updated
+
+    async def access(self, lab_id: UUID, caller: Caller) -> tuple[dict[str, Any], dict[str, str]]:
+        """The access details the template published for this lab, for its owner or an admin."""
+        row = await self.get_owned(lab_id, caller)
+        if self.access_store is None:
+            raise LabError(501, "access details are not configured (OPENBAO_ADDR)")
+        if row["status"] != LabStatus.ready:
+            raise LabError(409, f"access details are available once the lab is ready; it is {row['status']}")
+        path = self.settings.access_secret_path.format(name=row["name"])
+        try:
+            values = await self.access_store.read(path)
+        except Exception as error:
+            log.exception("reading access details of lab %s failed", lab_id)
+            raise LabError(502, "could not read access details") from error
+        if not values:
+            raise LabError(404, "this lab published no access details")
+        await self.db.add_event(lab_id, "access_viewed", caller.email, {"keys": sorted(values)})
+        return row, {k: str(v) for k, v in values.items()}
 
     async def _start_destroy(self, row: dict[str, Any], actor: str | None, reason: str) -> dict[str, Any]:
         lab_id = row["id"]

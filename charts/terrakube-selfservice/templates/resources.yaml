@@ -93,15 +93,32 @@ spec:
             {{- if .Values.token.existingSecret.name }}
             - name: TERRAKUBE_TOKEN_FILE
               value: /var/run/terrakube-selfservice/token
-            {{- else if .Values.token.openbao.addr }}
+            {{- end }}
+            {{- with include "tss.openbaoAddr" . }}
             - name: OPENBAO_ADDR
-              value: {{ .Values.token.openbao.addr | quote }}
+              value: {{ . | quote }}
             - name: OPENBAO_ROLE
-              value: {{ .Values.token.openbao.role | quote }}
+              value: {{ include "tss.openbaoRole" $ | quote }}
             - name: OPENBAO_SECRET_PATH
-              value: {{ .Values.token.openbao.secretPath | quote }}
+              value: {{ $.Values.token.openbao.secretPath | quote }}
             - name: OPENBAO_SECRET_KEY
-              value: {{ .Values.token.openbao.secretKey | quote }}
+              value: {{ $.Values.token.openbao.secretKey | quote }}
+            {{- end }}
+            - name: ACCESS_SECRET_PATH
+              value: {{ .Values.access.secretPath | quote }}
+            - name: ADMIN_EMAILS
+              value: {{ join "," .Values.users.adminEmails | quote }}
+            {{- with .Values.users.token }}
+            {{- if .issuer }}
+            - name: USER_TOKEN_ISSUER
+              value: {{ .issuer | quote }}
+            - name: USER_TOKEN_AUDIENCE
+              value: {{ .audience | quote }}
+            - name: USER_TOKEN_JWKS_URL
+              value: {{ .jwksUrl | quote }}
+            - name: USER_TOKEN_EMAIL_CLAIM
+              value: {{ .emailClaim | quote }}
+            {{- end }}
             {{- end }}
             - name: RECONCILE_INTERVAL_SECONDS
               value: {{ .Values.reconcileIntervalSeconds | quote }}

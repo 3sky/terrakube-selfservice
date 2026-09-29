@@ -20,16 +20,20 @@ The API contract is [`openapi.yaml`](openapi.yaml).
 | Endpoint | Purpose |
 |---|---|
 | `GET /v1/templates`, `GET /v1/templates/{id}` | Templates and their form inputs |
-| `POST /v1/labs` | Create a lab: `template_id`, `name`, `owner_email`, optional `ttl_hours`, `inputs` |
-| `GET /v1/labs`, `GET /v1/labs/{id}` | Labs and their status |
+| `POST /v1/labs` | Create a lab: `template_id`, `owner_email`, optional `name` (default `<owner>-<5 random chars>`), `ttl_hours`, `inputs` |
+| `GET /v1/labs`, `GET /v1/labs/{id}` | The caller's labs and their status (admins: all labs) |
+| `GET /v1/labs/{id}/access` | Access details the template published (kubeconfig, passwords, URLs); owner or admin, audited |
+| `POST /v1/labs/{id}/retry` | Re-run the apply of a `failed` lab |
 | `POST /v1/labs/{id}/extend` | Extend the TTL (capped at the template's `max_ttl_hours` from creation) |
 | `POST /v1/labs/{id}/destroy` | Destroy now; also retries a `destroy_failed` lab |
 | `GET /v1/labs/{id}/events` | Audit trail |
-| `GET /v1/analytics/summary`, `GET /v1/analytics/timeseries` | Usage analytics (`?days=30`) |
+| `GET /v1/analytics/summary`, `GET /v1/analytics/timeseries` | Usage analytics (`?days=30`), admins only |
 
-Requests carry `Authorization: Bearer <api key>`. Send `X-Actor-Email` with the end user's address to record who acted.
+Requests carry `Authorization: Bearer <api key>` (the portal) and the end user's identity: a verified OIDC ID token in `X-User-Token` (token mode, recommended) or `X-Actor-Email` set by the portal backend from its own session (header mode). Users only see and act on their own labs; `ADMIN_EMAILS` see all of them. **Portals must follow [docs/portal-integration.md](docs/portal-integration.md)**: backend-only calls, how to pass the user, and how to handle access details.
 
-Lab status: `pending` → `provisioning` → `ready` or `failed` → `destroying` → `destroyed` or `destroy_failed`. A `failed` lab still expires and is destroyed, which cleans up partial resources. A `destroy_failed` lab waits for a person to inspect the Terrakube run and retry.
+Lab status: `pending` → `provisioning` → `ready` or `failed` → `destroying` → `destroyed` or `destroy_failed`. A `failed` lab can be retried, and still expires and is destroyed, which cleans up partial resources. A `destroy_failed` lab waits for a person to inspect the Terrakube run and retry.
+
+**Access details.** Templates publish what the owner needs (kubeconfig, passwords, URLs) to OpenBao kv-v2 at `ACCESS_SECRET_PATH` (default `secret/data/labs/{name}`) and delete it when destroyed. `GET /v1/labs/{id}/access` returns it to the owner or an admin once the lab is `ready`, with `Cache-Control: no-store`, and records an `access_viewed` event. The service's OpenBao role needs read access to that path.
 
 ## Catalog
 
@@ -72,15 +76,17 @@ helm install selfservice oci://ghcr.io/3sky/charts/terrakube-selfservice \
   -f my-catalog-values.yaml   # catalog: { templates: [...] }
 ```
 
+Users: set `users.adminEmails`, and for token mode `users.token.issuer` and `users.token.audience` (the OIDC client the portal signs users in with; signing keys come from the issuer's discovery document unless `users.token.jwksUrl` is set). `openbao.addr` enables the access endpoint.
+
 The Terrakube token can come from:
 
 1. `token.existingSecret`: a Kubernetes Secret mounted as a file. It is re-read when Terrakube rejects the old token, so rotation needs no restart.
-2. `token.openbao`: OpenBao or Vault kv-v2, read with the pod's Kubernetes service account (`serviceAccount.name`). Create a Kubernetes auth role bound to that service account with read access to `token.openbao.secretPath`.
+2. OpenBao or Vault kv-v2 at `token.openbao.secretPath` (used when 1 and 3 are unset), read with the pod's Kubernetes service account (`serviceAccount.name`) through `openbao.addr`/`openbao.role`. The role needs read access to that path and to `access.secretPath`.
 3. `token.value`: stored in the chart's Secret. Use for development only.
 
 `existingSecret` (with `API_KEYS` and `DATABASE_URL`) and `existingCatalogConfigMap` replace the chart-managed Secret and ConfigMap. `route.*` publishes the API through a Gateway API `HTTPRoute`; otherwise it is cluster-internal.
 
-Environment variables (for running without the chart): `DATABASE_URL`, `API_KEYS` (comma-separated), `CATALOG_PATH`, `TERRAKUBE_API_URL`, `TERRAKUBE_UI_URL`, `TERRAKUBE_ORGANIZATION`, `TERRAKUBE_VCS_ID`, `TERRAKUBE_APPLY_TEMPLATE` (default `Plan and apply`), `TERRAKUBE_DESTROY_TEMPLATE` (default `Destroy`), one of `TERRAKUBE_TOKEN` / `TERRAKUBE_TOKEN_FILE` / `OPENBAO_ADDR` (+ `OPENBAO_ROLE`, `OPENBAO_SECRET_PATH`, `OPENBAO_SECRET_KEY`), `RECONCILE_INTERVAL_SECONDS` (default 30), `DELETE_WORKSPACE_AFTER_DESTROY` (default true).
+Environment variables (for running without the chart): `DATABASE_URL`, `API_KEYS` (comma-separated), `CATALOG_PATH`, `TERRAKUBE_API_URL`, `TERRAKUBE_UI_URL`, `TERRAKUBE_ORGANIZATION`, `TERRAKUBE_VCS_ID`, `TERRAKUBE_APPLY_TEMPLATE` (default `Plan and apply`), `TERRAKUBE_DESTROY_TEMPLATE` (default `Destroy`), one of `TERRAKUBE_TOKEN` / `TERRAKUBE_TOKEN_FILE` / `OPENBAO_ADDR` (+ `OPENBAO_ROLE`, `OPENBAO_SECRET_PATH`, `OPENBAO_SECRET_KEY`), `ACCESS_SECRET_PATH`, `ADMIN_EMAILS`, `USER_TOKEN_ISSUER` / `USER_TOKEN_AUDIENCE` / `USER_TOKEN_JWKS_URL` / `USER_TOKEN_EMAIL_CLAIM` (token mode), `RECONCILE_INTERVAL_SECONDS` (default 30), `DELETE_WORKSPACE_AFTER_DESTROY` (default true).
 
 ## Development
 

@@ -35,6 +35,19 @@ class Settings:
     pending_timeout_minutes: int
     delete_workspace_after_destroy: bool
 
+    # Users: admins see and act on every lab and read analytics. With
+    # USER_TOKEN_ISSUER set, users are identified by a verified OIDC token
+    # (X-User-Token) instead of the X-Actor-Email header.
+    admin_emails: tuple[str, ...] = ()
+    user_token_issuer: str | None = None
+    user_token_audience: str | None = None
+    user_token_jwks_url: str | None = None
+    user_token_email_claim: str = "email"
+
+    # Where a lab template publishes its access details in OpenBao (kv-v2);
+    # {name} is the lab name. Needs OPENBAO_ADDR.
+    access_secret_path: str = "secret/data/labs/{name}"
+
     @classmethod
     def from_env(cls) -> "Settings":
         if not any(os.environ.get(v) for v in ("TERRAKUBE_TOKEN", "TERRAKUBE_TOKEN_FILE", "OPENBAO_ADDR")):
@@ -63,4 +76,10 @@ class Settings:
             reconcile_interval_seconds=int(os.environ.get("RECONCILE_INTERVAL_SECONDS", "30")),
             pending_timeout_minutes=int(os.environ.get("PENDING_TIMEOUT_MINUTES", "10")),
             delete_workspace_after_destroy=_bool(os.environ.get("DELETE_WORKSPACE_AFTER_DESTROY"), True),
+            admin_emails=tuple(e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()),
+            user_token_issuer=(os.environ.get("USER_TOKEN_ISSUER") or "").rstrip("/") or None,
+            user_token_audience=os.environ.get("USER_TOKEN_AUDIENCE") or None,
+            user_token_jwks_url=os.environ.get("USER_TOKEN_JWKS_URL") or None,
+            user_token_email_claim=os.environ.get("USER_TOKEN_EMAIL_CLAIM", "email"),
+            access_secret_path=os.environ.get("ACCESS_SECRET_PATH", "secret/data/labs/{name}"),
         )

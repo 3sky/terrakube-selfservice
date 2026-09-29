@@ -106,8 +106,15 @@ class LabCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     template_id: str
-    name: str = Field(pattern=NAME_PATTERN, description="Lowercase, 4-32 chars; also names the workspace.")
-    owner_email: str = Field(pattern=EMAIL_PATTERN)
+    name: str | None = Field(
+        default=None,
+        pattern=NAME_PATTERN,
+        description="Lowercase, 4-32 chars; also names the workspace. Omit for a random `<owner>-<5 chars>` name.",
+    )
+    owner_email: str | None = Field(
+        default=None, pattern=EMAIL_PATTERN,
+        description="Defaults to the calling user. Only admins may create labs for someone else.",
+    )
     ttl_hours: int | None = Field(default=None, gt=0, description="Defaults to the template's default_ttl_hours.")
     inputs: dict[str, InputValue] = {}
 
@@ -134,6 +141,14 @@ class Lab(BaseModel):
 
 class LabList(BaseModel):
     items: list[Lab]
+
+
+class LabAccess(BaseModel):
+    """Access details the lab template published (kubeconfig, passwords, URLs). Show once; never cache."""
+
+    lab_id: UUID
+    name: str
+    values: dict[str, str]
 
 
 class ExtendRequest(BaseModel):

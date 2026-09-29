@@ -4,7 +4,7 @@ info:
   description: Self-service environments (labs) on Terrakube. Pick a template, submit
     its inputs, and the service creates a Terrakube workspace, applies it, and destroys
     it when its TTL expires.
-  version: 0.1.0
+  version: 0.2.0
 paths:
   /v1/templates:
     get:
@@ -20,7 +20,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/TemplateList'
         '401':
-          description: Missing or invalid API key
+          description: Missing or invalid API key or user identity
           content:
             application/json:
               schema:
@@ -50,13 +50,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/Template'
         '401':
-          description: Missing or invalid API key
+          description: Missing or invalid API key or user identity
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '404':
-          description: Not found
+          description: Not found, or not visible to this user
           content:
             application/json:
               schema:
@@ -85,11 +85,23 @@ paths:
           anyOf:
           - type: string
           - type: 'null'
-          description: End user acting through the calling portal; recorded in the
-            audit trail.
+          description: 'Header mode: the signed-in user, set by the portal backend
+            from its own session. Ignored in token mode.'
           title: X-Actor-Email
-        description: End user acting through the calling portal; recorded in the audit
-          trail.
+        description: 'Header mode: the signed-in user, set by the portal backend from
+          its own session. Ignored in token mode.'
+      - name: X-User-Token
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Token mode: the signed-in user''s OIDC ID token, verified
+            by the service.'
+          title: X-User-Token
+        description: 'Token mode: the signed-in user''s OIDC ID token, verified by
+          the service.'
       requestBody:
         required: true
         content:
@@ -104,7 +116,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/Lab'
         '401':
-          description: Missing or invalid API key
+          description: Missing or invalid API key or user identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: The user may not do this
           content:
             application/json:
               schema:
@@ -122,7 +140,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Problem'
         '502':
-          description: Terrakube request failed
+          description: Terrakube or OpenBao request failed
           content:
             application/json:
               schema:
@@ -142,7 +160,9 @@ paths:
           anyOf:
           - type: string
           - type: 'null'
+          description: Admins only; other users always see their own labs.
           title: Owner Email
+        description: Admins only; other users always see their own labs.
       - name: status
         in: query
         required: false
@@ -175,6 +195,30 @@ paths:
           minimum: 1
           default: 100
           title: Limit
+      - name: X-Actor-Email
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Header mode: the signed-in user, set by the portal backend
+            from its own session. Ignored in token mode.'
+          title: X-Actor-Email
+        description: 'Header mode: the signed-in user, set by the portal backend from
+          its own session. Ignored in token mode.'
+      - name: X-User-Token
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Token mode: the signed-in user''s OIDC ID token, verified
+            by the service.'
+          title: X-User-Token
+        description: 'Token mode: the signed-in user''s OIDC ID token, verified by
+          the service.'
       responses:
         '200':
           description: Successful Response
@@ -183,7 +227,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/LabList'
         '401':
-          description: Missing or invalid API key
+          description: Missing or invalid API key or user identity
           content:
             application/json:
               schema:
@@ -210,6 +254,30 @@ paths:
           type: string
           format: uuid
           title: Lab Id
+      - name: X-Actor-Email
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Header mode: the signed-in user, set by the portal backend
+            from its own session. Ignored in token mode.'
+          title: X-Actor-Email
+        description: 'Header mode: the signed-in user, set by the portal backend from
+          its own session. Ignored in token mode.'
+      - name: X-User-Token
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Token mode: the signed-in user''s OIDC ID token, verified
+            by the service.'
+          title: X-User-Token
+        description: 'Token mode: the signed-in user''s OIDC ID token, verified by
+          the service.'
       responses:
         '200':
           description: Successful Response
@@ -218,13 +286,102 @@ paths:
               schema:
                 $ref: '#/components/schemas/Lab'
         '401':
-          description: Missing or invalid API key
+          description: Missing or invalid API key or user identity
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '404':
-          description: Not found
+          description: Not found, or not visible to this user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/labs/{lab_id}/access:
+    get:
+      tags:
+      - labs
+      summary: Access details of a ready lab
+      description: 'Kubeconfig, passwords, URLs published by the template. Owner or
+        admin only; every read is audited.
+
+
+        The response is marked `Cache-Control: no-store`: show it to the user, never
+        cache, log or store it.'
+      operationId: lab_access
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: lab_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Lab Id
+      - name: X-Actor-Email
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Header mode: the signed-in user, set by the portal backend
+            from its own session. Ignored in token mode.'
+          title: X-Actor-Email
+        description: 'Header mode: the signed-in user, set by the portal backend from
+          its own session. Ignored in token mode.'
+      - name: X-User-Token
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Token mode: the signed-in user''s OIDC ID token, verified
+            by the service.'
+          title: X-User-Token
+        description: 'Token mode: the signed-in user''s OIDC ID token, verified by
+          the service.'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LabAccess'
+        '401':
+          description: Missing or invalid API key or user identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Not found, or not visible to this user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: Conflict with the lab's current state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '501':
+          description: Not configured on this installation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '502':
+          description: Terrakube or OpenBao request failed
           content:
             application/json:
               schema:
@@ -258,11 +415,23 @@ paths:
           anyOf:
           - type: string
           - type: 'null'
-          description: End user acting through the calling portal; recorded in the
-            audit trail.
+          description: 'Header mode: the signed-in user, set by the portal backend
+            from its own session. Ignored in token mode.'
           title: X-Actor-Email
-        description: End user acting through the calling portal; recorded in the audit
-          trail.
+        description: 'Header mode: the signed-in user, set by the portal backend from
+          its own session. Ignored in token mode.'
+      - name: X-User-Token
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Token mode: the signed-in user''s OIDC ID token, verified
+            by the service.'
+          title: X-User-Token
+        description: 'Token mode: the signed-in user''s OIDC ID token, verified by
+          the service.'
       requestBody:
         required: true
         content:
@@ -277,13 +446,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/Lab'
         '401':
-          description: Missing or invalid API key
+          description: Missing or invalid API key or user identity
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '404':
-          description: Not found
+          description: Not found, or not visible to this user
           content:
             application/json:
               schema:
@@ -300,6 +469,85 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Problem'
+  /v1/labs/{lab_id}/retry:
+    post:
+      tags:
+      - labs
+      summary: Retry a failed lab
+      description: Runs the apply again in the lab's existing workspace; the lab goes
+        back to `provisioning`.
+      operationId: retry_lab
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: lab_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Lab Id
+      - name: X-Actor-Email
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Header mode: the signed-in user, set by the portal backend
+            from its own session. Ignored in token mode.'
+          title: X-Actor-Email
+        description: 'Header mode: the signed-in user, set by the portal backend from
+          its own session. Ignored in token mode.'
+      - name: X-User-Token
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Token mode: the signed-in user''s OIDC ID token, verified
+            by the service.'
+          title: X-User-Token
+        description: 'Token mode: the signed-in user''s OIDC ID token, verified by
+          the service.'
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lab'
+        '401':
+          description: Missing or invalid API key or user identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Not found, or not visible to this user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: Conflict with the lab's current state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '502':
+          description: Terrakube or OpenBao request failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /v1/labs/{lab_id}/destroy:
     post:
       tags:
@@ -325,11 +573,23 @@ paths:
           anyOf:
           - type: string
           - type: 'null'
-          description: End user acting through the calling portal; recorded in the
-            audit trail.
+          description: 'Header mode: the signed-in user, set by the portal backend
+            from its own session. Ignored in token mode.'
           title: X-Actor-Email
-        description: End user acting through the calling portal; recorded in the audit
-          trail.
+        description: 'Header mode: the signed-in user, set by the portal backend from
+          its own session. Ignored in token mode.'
+      - name: X-User-Token
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Token mode: the signed-in user''s OIDC ID token, verified
+            by the service.'
+          title: X-User-Token
+        description: 'Token mode: the signed-in user''s OIDC ID token, verified by
+          the service.'
       requestBody:
         content:
           application/json:
@@ -346,13 +606,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/Lab'
         '401':
-          description: Missing or invalid API key
+          description: Missing or invalid API key or user identity
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '404':
-          description: Not found
+          description: Not found, or not visible to this user
           content:
             application/json:
               schema:
@@ -364,7 +624,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Problem'
         '502':
-          description: Terrakube request failed
+          description: Terrakube or OpenBao request failed
           content:
             application/json:
               schema:
@@ -391,6 +651,30 @@ paths:
           type: string
           format: uuid
           title: Lab Id
+      - name: X-Actor-Email
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Header mode: the signed-in user, set by the portal backend
+            from its own session. Ignored in token mode.'
+          title: X-Actor-Email
+        description: 'Header mode: the signed-in user, set by the portal backend from
+          its own session. Ignored in token mode.'
+      - name: X-User-Token
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Token mode: the signed-in user''s OIDC ID token, verified
+            by the service.'
+          title: X-User-Token
+        description: 'Token mode: the signed-in user''s OIDC ID token, verified by
+          the service.'
       responses:
         '200':
           description: Successful Response
@@ -399,13 +683,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/LabEventList'
         '401':
-          description: Missing or invalid API key
+          description: Missing or invalid API key or user identity
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '404':
-          description: Not found
+          description: Not found, or not visible to this user
           content:
             application/json:
               schema:
@@ -420,7 +704,7 @@ paths:
     get:
       tags:
       - analytics
-      summary: Usage summary
+      summary: Usage summary (admins)
       operationId: analytics_summary
       security:
       - HTTPBearer: []
@@ -434,6 +718,30 @@ paths:
           minimum: 1
           default: 30
           title: Days
+      - name: X-Actor-Email
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Header mode: the signed-in user, set by the portal backend
+            from its own session. Ignored in token mode.'
+          title: X-Actor-Email
+        description: 'Header mode: the signed-in user, set by the portal backend from
+          its own session. Ignored in token mode.'
+      - name: X-User-Token
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Token mode: the signed-in user''s OIDC ID token, verified
+            by the service.'
+          title: X-User-Token
+        description: 'Token mode: the signed-in user''s OIDC ID token, verified by
+          the service.'
       responses:
         '200':
           description: Successful Response
@@ -442,7 +750,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/AnalyticsSummary'
         '401':
-          description: Missing or invalid API key
+          description: Missing or invalid API key or user identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: The user may not do this
           content:
             application/json:
               schema:
@@ -457,7 +771,7 @@ paths:
     get:
       tags:
       - analytics
-      summary: Daily created, destroyed and expired labs
+      summary: Daily created, destroyed and expired labs (admins)
       operationId: analytics_timeseries
       security:
       - HTTPBearer: []
@@ -471,6 +785,30 @@ paths:
           minimum: 1
           default: 30
           title: Days
+      - name: X-Actor-Email
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Header mode: the signed-in user, set by the portal backend
+            from its own session. Ignored in token mode.'
+          title: X-Actor-Email
+        description: 'Header mode: the signed-in user, set by the portal backend from
+          its own session. Ignored in token mode.'
+      - name: X-User-Token
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Token mode: the signed-in user''s OIDC ID token, verified
+            by the service.'
+          title: X-User-Token
+        description: 'Token mode: the signed-in user''s OIDC ID token, verified by
+          the service.'
       responses:
         '200':
           description: Successful Response
@@ -479,7 +817,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/AnalyticsTimeseries'
         '401':
-          description: Missing or invalid API key
+          description: Missing or invalid API key or user identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: The user may not do this
           content:
             application/json:
               schema:
@@ -704,20 +1048,49 @@ components:
       - expires_at
       - extension_count
       title: Lab
+    LabAccess:
+      properties:
+        lab_id:
+          type: string
+          format: uuid
+          title: Lab Id
+        name:
+          type: string
+          title: Name
+        values:
+          additionalProperties:
+            type: string
+          type: object
+          title: Values
+      type: object
+      required:
+      - lab_id
+      - name
+      - values
+      title: LabAccess
+      description: Access details the lab template published (kubeconfig, passwords,
+        URLs). Show once; never cache.
     LabCreate:
       properties:
         template_id:
           type: string
           title: Template Id
         name:
-          type: string
-          pattern: ^[a-z][a-z0-9-]{2,30}[a-z0-9]$
+          anyOf:
+          - type: string
+            pattern: ^[a-z][a-z0-9-]{2,30}[a-z0-9]$
+          - type: 'null'
           title: Name
-          description: Lowercase, 4-32 chars; also names the workspace.
+          description: Lowercase, 4-32 chars; also names the workspace. Omit for a
+            random `<owner>-<5 chars>` name.
         owner_email:
-          type: string
-          pattern: ^[^@\s]+@[^@\s]+\.[^@\s]+$
+          anyOf:
+          - type: string
+            pattern: ^[^@\s]+@[^@\s]+\.[^@\s]+$
+          - type: 'null'
           title: Owner Email
+          description: Defaults to the calling user. Only admins may create labs for
+            someone else.
         ttl_hours:
           anyOf:
           - type: integer
@@ -739,8 +1112,6 @@ components:
       type: object
       required:
       - template_id
-      - name
-      - owner_email
       title: LabCreate
     LabEvent:
       properties:

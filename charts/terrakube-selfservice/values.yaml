@@ -39,20 +39,46 @@ terrakube:
   applyTemplate: Plan and apply
   destroyTemplate: Destroy
 
+# --- OpenBao / Vault ------------------------------------------------------
+# Kubernetes auth with serviceAccount.name. Used for the access endpoint and,
+# unless token.existingSecret or token.value is set, for the Terrakube token.
+openbao:
+  addr: ""
+  role: terrakube-selfservice
+
 # Terrakube personal access token, one of:
 token:
   # 1. An existing Secret, mounted as a file and re-read after a 401.
   existingSecret:
     name: ""
     key: token
-  # 2. OpenBao or Vault kv-v2 via Kubernetes auth.
+  # 2. OpenBao kv-v2 (openbao.addr above). addr/role here are accepted as
+  #    aliases of openbao.addr/openbao.role for 0.1.x values files.
   openbao:
     addr: ""
-    role: terrakube-selfservice
+    role: ""
     secretPath: secret/data/terrakube-selfservice
     secretKey: terrakube_token
   # 3. A literal value, stored in the chart's Secret (development only).
   value: ""
+
+# --- Users ------------------------------------------------------------------
+users:
+  # May see and act on every lab and read analytics.
+  adminEmails: []
+  # Token mode: identify users by their OIDC ID token (X-User-Token) instead of
+  # the X-Actor-Email header set by the portal backend. Recommended.
+  token:
+    issuer: ""
+    audience: ""
+    # Defaults to the issuer's discovery document.
+    jwksUrl: ""
+    emailClaim: email
+
+# --- Access details ---------------------------------------------------------
+access:
+  # kv-v2 path where templates publish each lab's access details; {name} is the lab name.
+  secretPath: secret/data/labs/{name}
 
 reconcileIntervalSeconds: 30
 deleteWorkspaceAfterDestroy: true

@@ -146,6 +146,13 @@ class Database:
                 )
             return row
 
+    async def add_event(self, lab_id: UUID, kind: str, actor: str | None, details: dict[str, Any]) -> None:
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO lab_events (lab_id, type, actor, details) VALUES (%s, %s, %s, %s)",
+                (lab_id, kind, actor, Jsonb(details)),
+            )
+
     async def labs_in_status(self, statuses: set[str]) -> list[dict[str, Any]]:
         return await self._all("SELECT * FROM labs WHERE status = ANY(%(s)s)", {"s": list(statuses)})
 

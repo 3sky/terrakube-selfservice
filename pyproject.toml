@@ -1,6 +1,6 @@
 [project]
 name = "terrakube-selfservice"
-version = "0.1.0"
+version = "0.2.0"
 description = "Self-service environments on Terrakube: templates with forms, TTL policy and usage analytics"
 requires-python = ">=3.13"
 license = "MIT"
@@ -11,6 +11,7 @@ dependencies = [
   "httpx==0.28.1",
   "psycopg[binary,pool]==3.2.10",
   "pyyaml==6.0.3",
+  "pyjwt[crypto]==2.10.1",
 ]
 
 [build-system]

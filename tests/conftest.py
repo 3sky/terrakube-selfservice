@@ -8,12 +8,26 @@ from httpx import ASGITransport, AsyncClient
 from app.catalog import Catalog
 from app.config import Settings
 from app.db import Database
+from app.identity import IdentityResolver
 from app.main import build_app
 from app.models import TemplateSpec
 from app.service import LabService
 
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
 API_KEY = "test-key"
+ALICE = {"X-Actor-Email": "alice@example.com"}
+BOB = {"X-Actor-Email": "bob@example.com"}
+ADMIN = {"X-Actor-Email": "admin@example.com"}
+
+
+class FakeAccessStore:
+    def __init__(self):
+        self.secrets: dict[str, dict] = {}
+        self.reads: list[str] = []
+
+    async def read(self, path: str):
+        self.reads.append(path)
+        return self.secrets.get(path)
 
 
 class FakeTerrakube:
@@ -55,6 +69,7 @@ def settings() -> Settings:
         terrakube_vcs_id="vcs-1", terrakube_apply_template="Plan and apply", terrakube_destroy_template="Destroy",
         terrakube_token="x", terrakube_token_file=None, openbao_addr=None, openbao_role="", openbao_secret_path="", openbao_secret_key="",
         reconcile_interval_seconds=3600, pending_timeout_minutes=10, delete_workspace_after_destroy=True,
+        admin_emails=("admin@example.com",),
     )
 
 
@@ -87,12 +102,12 @@ async def env(database):
     async with database.pool.connection() as conn:
         await conn.execute("TRUNCATE lab_events, labs")
     terrakube = FakeTerrakube()
-    service = LabService(settings(), CATALOG, database, terrakube)
-    app = build_app(service=service, run_reconciler=False)
+    service = LabService(settings(), CATALOG, database, terrakube, access_store=FakeAccessStore())
+    app = build_app(service=service, run_reconciler=False, identity=IdentityResolver(("admin@example.com",)))
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test",
-                               headers={"Authorization": f"Bearer {API_KEY}"}) as client:
+                               headers={"Authorization": f"Bearer {API_KEY}", **ALICE}) as client:
             yield client, service, terrakube
 
 

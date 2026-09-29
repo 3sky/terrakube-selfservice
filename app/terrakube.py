@@ -8,10 +8,11 @@ from typing import Any, Protocol
 
 import httpx
 
+from .openbao import OpenBaoClient
+
 log = logging.getLogger(__name__)
 
 JSONAPI = "application/vnd.api+json"
-SERVICE_ACCOUNT_TOKEN = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 
 # Terrakube job statuses that end a job.
 JOB_SUCCEEDED = {"completed", "noChanges"}
@@ -56,41 +57,29 @@ class FileToken:
 
 
 class OpenBaoToken:
-    """Reads the Terrakube token from OpenBao (or Vault) kv-v2 using Kubernetes auth.
+    """Reads the Terrakube token from OpenBao (or Vault) kv-v2.
 
     The value is cached and re-read after invalidate(), so rotating the token
     in OpenBao needs no restart.
     """
 
-    def __init__(self, http: httpx.AsyncClient, addr: str, role: str, path: str, key: str):
-        self._http, self._addr, self._role, self._path, self._key = http, addr, role, path, key
+    def __init__(self, bao: "OpenBaoClient", path: str, key: str):
+        self._bao, self._path, self._key = bao, path, key
         self._token: str | None = None
         self._lock = asyncio.Lock()
 
     async def get(self) -> str:
         async with self._lock:
             if self._token is None:
-                self._token = await self._read()
+                secret = await self._bao.read(self._path)
+                value = (secret or {}).get(self._key)
+                if not value:
+                    raise TerrakubeError(f"OpenBao {self._path} has no key {self._key}")
+                self._token = value
             return self._token
 
     def invalidate(self) -> None:
         self._token = None
-
-    async def _read(self) -> str:
-        login = await self._http.post(
-            f"{self._addr}/v1/auth/kubernetes/login",
-            json={"role": self._role, "jwt": SERVICE_ACCOUNT_TOKEN.read_text()},
-        )
-        if login.status_code != 200:
-            raise TerrakubeError(f"OpenBao login failed: HTTP {login.status_code}")
-        bao_token = login.json()["auth"]["client_token"]
-        secret = await self._http.get(f"{self._addr}/v1/{self._path}", headers={"X-Vault-Token": bao_token})
-        if secret.status_code != 200:
-            raise TerrakubeError(f"OpenBao read {self._path} failed: HTTP {secret.status_code}")
-        value = secret.json()["data"]["data"].get(self._key)
-        if not value:
-            raise TerrakubeError(f"OpenBao {self._path} has no key {self._key}")
-        return value
 
 
 class Terrakube(Protocol):
