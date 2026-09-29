@@ -1,0 +1,257 @@
+{
+  "$defs": {
+    "InputType": {
+      "enum": [
+        "string",
+        "number",
+        "boolean",
+        "enum"
+      ],
+      "title": "InputType",
+      "type": "string"
+    },
+    "TemplateInput": {
+      "description": "One form field. Portals render their form from these.",
+      "properties": {
+        "name": {
+          "description": "Terraform variable name.",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/InputType",
+          "default": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "required": {
+          "default": false,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "default": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Default"
+        },
+        "options": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Allowed values for type enum.",
+          "title": "Options"
+        },
+        "pattern": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Regular expression for type string.",
+          "title": "Pattern"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum"
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum"
+        },
+        "sensitive": {
+          "default": false,
+          "description": "Hidden in API responses and Terrakube UI.",
+          "title": "Sensitive",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "label"
+      ],
+      "title": "TemplateInput",
+      "type": "object"
+    },
+    "TemplateSource": {
+      "properties": {
+        "repository": {
+          "title": "Repository",
+          "type": "string"
+        },
+        "branch": {
+          "default": "main",
+          "title": "Branch",
+          "type": "string"
+        },
+        "folder": {
+          "default": "/",
+          "title": "Folder",
+          "type": "string"
+        },
+        "iac_type": {
+          "default": "tofu",
+          "title": "Iac Type",
+          "type": "string"
+        },
+        "iac_version": {
+          "default": "1.12.6",
+          "title": "Iac Version",
+          "type": "string"
+        },
+        "use_vcs_connection": {
+          "default": true,
+          "description": "Clone through the organization's GitHub connection (private repos).",
+          "title": "Use Vcs Connection",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "repository"
+      ],
+      "title": "TemplateSource",
+      "type": "object"
+    },
+    "TemplateSpec": {
+      "description": "Catalog entry; source, env and variables are internal and not returned by the API.",
+      "properties": {
+        "id": {
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "default_ttl_hours": {
+          "exclusiveMinimum": 0,
+          "title": "Default Ttl Hours",
+          "type": "integer"
+        },
+        "max_ttl_hours": {
+          "description": "Maximum lifetime from creation, including extensions.",
+          "exclusiveMinimum": 0,
+          "title": "Max Ttl Hours",
+          "type": "integer"
+        },
+        "inputs": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TemplateInput"
+          },
+          "title": "Inputs",
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/$defs/TemplateSource"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Fixed ENV variables for every lab.",
+          "title": "Env",
+          "type": "object"
+        },
+        "variables": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Fixed Terraform variables.",
+          "title": "Variables",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "default_ttl_hours",
+        "max_ttl_hours",
+        "source"
+      ],
+      "title": "TemplateSpec",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The deployment's catalog file (CATALOG_PATH). See catalog.schema.json.",
+  "properties": {
+    "templates": {
+      "items": {
+        "$ref": "#/$defs/TemplateSpec"
+      },
+      "title": "Templates",
+      "type": "array"
+    }
+  },
+  "required": [
+    "templates"
+  ],
+  "title": "Terrakube Self-Service catalog",
+  "type": "object"
+}

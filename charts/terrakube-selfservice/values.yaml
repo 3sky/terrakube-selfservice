@@ -1,0 +1,76 @@
+image:
+  repository: ghcr.io/3sky/terrakube-selfservice
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# --- Catalog: the templates this deployment offers --------------------------
+# Structured catalog, validated against catalog.schema.json at install time.
+# See examples/catalog.yaml in the repository.
+catalog:
+  templates: []
+# Or use an existing ConfigMap with a catalog.yaml key (catalog is then ignored).
+existingCatalogConfigMap: ""
+
+# --- API keys and database -----------------------------------------------------
+# Bearer keys accepted from calling portals (several allow rotation).
+apiKeys: []
+database:
+  host: ""
+  port: 5432
+  name: terrakube_selfservice
+  user: terrakube_selfservice
+  password: ""
+  sslmode: require
+# Or an existing Secret with API_KEYS (comma-separated) and DATABASE_URL keys;
+# apiKeys and database are then ignored.
+existingSecret: ""
+
+# --- Terrakube -----------------------------------------------------------------
+terrakube:
+  apiUrl: http://terrakube-api-service.terrakube.svc.cluster.local:8080
+  # Public UI URL, used for workspace links. Required.
+  uiUrl: ""
+  # Organization that owns the lab workspaces. Required.
+  organization: ""
+  # VCS connection id for private template repositories (optional).
+  vcsId: ""
+  applyTemplate: Plan and apply
+  destroyTemplate: Destroy
+
+# Terrakube personal access token, one of:
+token:
+  # 1. An existing Secret, mounted as a file and re-read after a 401.
+  existingSecret:
+    name: ""
+    key: token
+  # 2. OpenBao or Vault kv-v2 via Kubernetes auth.
+  openbao:
+    addr: ""
+    role: terrakube-selfservice
+    secretPath: secret/data/terrakube-selfservice
+    secretKey: terrakube_token
+  # 3. A literal value, stored in the chart's Secret (development only).
+  value: ""
+
+reconcileIntervalSeconds: 30
+deleteWorkspaceAfterDestroy: true
+
+serviceAccount:
+  # Bind this name in your OpenBao/Vault Kubernetes auth role.
+  name: terrakube-selfservice
+
+# Optional Gateway API route; the prefix is stripped before the service.
+route:
+  enabled: false
+  hostnames: []
+  pathPrefix: /selfservice
+  parentRefs: []
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 96Mi
+  limits:
+    memory: 256Mi

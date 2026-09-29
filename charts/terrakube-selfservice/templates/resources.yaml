@@ -1,0 +1,194 @@
+{{- include "tss.validate" . }}
+{{- $name := include "tss.name" . }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.serviceAccount.name }}
+{{- if not .Values.existingSecret }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+type: Opaque
+stringData:
+  API_KEYS: {{ required "apiKeys is required" (join "," .Values.apiKeys) | quote }}
+  {{- with .Values.database }}
+  DATABASE_URL: {{ printf "postgresql://%s:%s@%s:%v/%s?sslmode=%s" .user (required "database.password is required" .password) (required "database.host is required" .host) .port .name .sslmode | quote }}
+  {{- end }}
+  {{- with .Values.token.value }}
+  TERRAKUBE_TOKEN: {{ . | quote }}
+  {{- end }}
+{{- end }}
+{{- if not .Values.existingCatalogConfigMap }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tss.catalogConfigMap" . }}
+data:
+  catalog.yaml: |
+    {{- toYaml .Values.catalog | nindent 4 }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    app.kubernetes.io/name: terrakube-selfservice
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  # The reconciler is guarded by a PostgreSQL advisory lock; one replica is
+  # enough for most installations.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: terrakube-selfservice
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: terrakube-selfservice
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      annotations:
+        # Restart on catalog or credential changes.
+        checksum/config: {{ printf "%s|%s|%s|%s" (toJson .Values.catalog) (toJson .Values.apiKeys) (toJson .Values.database) .Values.token.value | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: {{ include "tss.secretName" . }}
+          env:
+            - name: CATALOG_PATH
+              value: /etc/terrakube-selfservice/catalog.yaml
+            - name: TERRAKUBE_API_URL
+              value: {{ .Values.terrakube.apiUrl | quote }}
+            - name: TERRAKUBE_UI_URL
+              value: {{ .Values.terrakube.uiUrl | quote }}
+            - name: TERRAKUBE_ORGANIZATION
+              value: {{ .Values.terrakube.organization | quote }}
+            - name: TERRAKUBE_VCS_ID
+              value: {{ .Values.terrakube.vcsId | quote }}
+            - name: TERRAKUBE_APPLY_TEMPLATE
+              value: {{ .Values.terrakube.applyTemplate | quote }}
+            - name: TERRAKUBE_DESTROY_TEMPLATE
+              value: {{ .Values.terrakube.destroyTemplate | quote }}
+            {{- if .Values.token.existingSecret.name }}
+            - name: TERRAKUBE_TOKEN_FILE
+              value: /var/run/terrakube-selfservice/token
+            {{- else if .Values.token.openbao.addr }}
+            - name: OPENBAO_ADDR
+              value: {{ .Values.token.openbao.addr | quote }}
+            - name: OPENBAO_ROLE
+              value: {{ .Values.token.openbao.role | quote }}
+            - name: OPENBAO_SECRET_PATH
+              value: {{ .Values.token.openbao.secretPath | quote }}
+            - name: OPENBAO_SECRET_KEY
+              value: {{ .Values.token.openbao.secretKey | quote }}
+            {{- end }}
+            - name: RECONCILE_INTERVAL_SECONDS
+              value: {{ .Values.reconcileIntervalSeconds | quote }}
+            - name: DELETE_WORKSPACE_AFTER_DESTROY
+              value: {{ .Values.deleteWorkspaceAfterDestroy | quote }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: catalog
+              mountPath: /etc/terrakube-selfservice
+              readOnly: true
+            {{- if .Values.token.existingSecret.name }}
+            - name: token
+              mountPath: /var/run/terrakube-selfservice
+              readOnly: true
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: catalog
+          configMap:
+            name: {{ include "tss.catalogConfigMap" . }}
+        {{- with .Values.token.existingSecret }}
+        {{- if .name }}
+        - name: token
+          secret:
+            secretName: {{ .name }}
+            items:
+              - key: {{ .key }}
+                path: token
+        {{- end }}
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+spec:
+  selector:
+    app.kubernetes.io/name: terrakube-selfservice
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+{{- if .Values.route.enabled }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $name }}
+spec:
+  parentRefs:
+    {{- required "route.parentRefs is required" .Values.route.parentRefs | toYaml | nindent 4 }}
+  {{- with .Values.route.hostnames }}
+  hostnames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.route.pathPrefix }}
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - name: {{ $name }}
+          port: 8080
+{{- end }}

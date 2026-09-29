@@ -1,0 +1,9 @@
+apiVersion: v2
+name: terrakube-selfservice
+description: Self-service environments on Terrakube (templates with forms, TTL policy, usage analytics)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/3sky/terrakube-selfservice
+sources:
+  - https://github.com/3sky/terrakube-selfservice

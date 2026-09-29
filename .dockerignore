@@ -1,0 +1,11 @@
+.git
+.github
+charts
+examples
+tests
+scripts
+*.md
+openapi.yaml
+catalog.schema.json
+**/__pycache__
+*.egg-info

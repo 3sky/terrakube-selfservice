@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=../catalog.schema.json
+#
+# Example catalog. The catalog is deployment configuration: pass it to the
+# Helm chart as the `catalog` value (or mount it and set CATALOG_PATH).
+# Validate with: python -m app.catalog check catalog.yaml
+#
+# Each template is a Terraform/OpenTofu root module in a Git repository.
+# `inputs` become Terraform variables and describe the form a portal shows.
+# Every lab also receives TF_VAR_lab_id, TF_VAR_lab_name, TF_VAR_lab_owner
+# and TF_VAR_lab_expires_at; declare them in the module to use them.
+templates:
+  - id: aws-lab
+    name: AWS lab
+    description: Isolated AWS sandbox (VPC and a test instance).
+    default_ttl_hours: 72
+    max_ttl_hours: 336
+    source:
+      repository: https://github.com/your-org/lab-templates
+      branch: main
+      folder: /aws-lab
+      iac_type: tofu
+      iac_version: 1.12.6
+      use_vcs_connection: true
+    env:
+      AWS_DEFAULT_REGION: eu-central-1
+    inputs:
+      - name: aws_region
+        label: AWS region
+        type: enum
+        options: [eu-central-1, eu-west-1, us-east-1, us-west-2]
+        default: eu-central-1
+      - name: instance_type
+        label: Instance type
+        type: enum
+        options: [t3.micro, t3.small, t3.medium]
+        default: t3.small
+      - name: customer
+        label: Customer or case reference
+        type: string
+        required: true
+        pattern: "^[A-Za-z0-9 ._-]{2,64}$"

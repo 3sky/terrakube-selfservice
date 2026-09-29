@@ -1,0 +1,1010 @@
+openapi: 3.1.0
+info:
+  title: Terrakube Self-Service
+  description: Self-service environments (labs) on Terrakube. Pick a template, submit
+    its inputs, and the service creates a Terrakube workspace, applies it, and destroys
+    it when its TTL expires.
+  version: 0.1.0
+paths:
+  /v1/templates:
+    get:
+      tags:
+      - templates
+      summary: List lab templates
+      operationId: list_templates
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateList'
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+      security:
+      - HTTPBearer: []
+  /v1/templates/{template_id}:
+    get:
+      tags:
+      - templates
+      summary: Get a template and its form inputs
+      operationId: get_template
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: template_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Template Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/labs:
+    post:
+      tags:
+      - labs
+      summary: Create a lab from a template
+      description: Creates the Terrakube workspace and queues its apply. Poll the
+        lab until `ready` or `failed`.
+      operationId: create_lab
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: X-Actor-Email
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: End user acting through the calling portal; recorded in the
+            audit trail.
+          title: X-Actor-Email
+        description: End user acting through the calling portal; recorded in the audit
+          trail.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LabCreate'
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lab'
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: Conflict with the lab's current state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '502':
+          description: Terrakube request failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+    get:
+      tags:
+      - labs
+      summary: List labs
+      operationId: list_labs
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: owner_email
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Owner Email
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - $ref: '#/components/schemas/LabStatus'
+          - type: 'null'
+          title: Status
+      - name: template_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Template Id
+      - name: include_destroyed
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+          title: Include Destroyed
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 500
+          minimum: 1
+          default: 100
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LabList'
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /v1/labs/{lab_id}:
+    get:
+      tags:
+      - labs
+      summary: Get a lab
+      operationId: get_lab
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: lab_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Lab Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lab'
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/labs/{lab_id}/extend:
+    post:
+      tags:
+      - labs
+      summary: Extend a lab's TTL
+      operationId: extend_lab
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: lab_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Lab Id
+      - name: X-Actor-Email
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: End user acting through the calling portal; recorded in the
+            audit trail.
+          title: X-Actor-Email
+        description: End user acting through the calling portal; recorded in the audit
+          trail.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExtendRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lab'
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: Conflict with the lab's current state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /v1/labs/{lab_id}/destroy:
+    post:
+      tags:
+      - labs
+      summary: Destroy a lab now
+      description: Queues a destroy job; the workspace is deleted once it completes.
+        Also retries a `destroy_failed` lab.
+      operationId: destroy_lab
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: lab_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Lab Id
+      - name: X-Actor-Email
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: End user acting through the calling portal; recorded in the
+            audit trail.
+          title: X-Actor-Email
+        description: End user acting through the calling portal; recorded in the audit
+          trail.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              anyOf:
+              - $ref: '#/components/schemas/DestroyRequest'
+              - type: 'null'
+              title: Body
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lab'
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: Conflict with the lab's current state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '502':
+          description: Terrakube request failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/labs/{lab_id}/events:
+    get:
+      tags:
+      - labs
+      summary: Audit trail of a lab
+      operationId: lab_events
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: lab_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Lab Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LabEventList'
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/analytics/summary:
+    get:
+      tags:
+      - analytics
+      summary: Usage summary
+      operationId: analytics_summary
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: days
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 365
+          minimum: 1
+          default: 30
+          title: Days
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsSummary'
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /v1/analytics/timeseries:
+    get:
+      tags:
+      - analytics
+      summary: Daily created, destroyed and expired labs
+      operationId: analytics_timeseries
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: days
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 365
+          minimum: 1
+          default: 30
+          title: Days
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsTimeseries'
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+components:
+  schemas:
+    AnalyticsSummary:
+      properties:
+        window_days:
+          type: integer
+          title: Window Days
+        active_labs:
+          type: integer
+          title: Active Labs
+        by_status:
+          additionalProperties:
+            type: integer
+          type: object
+          title: By Status
+        created:
+          type: integer
+          title: Created
+        destroyed:
+          type: integer
+          title: Destroyed
+        expired:
+          type: integer
+          title: Expired
+        provision_failures:
+          type: integer
+          title: Provision Failures
+        templates:
+          items:
+            $ref: '#/components/schemas/TemplateStats'
+          type: array
+          title: Templates
+        top_owners:
+          items:
+            $ref: '#/components/schemas/OwnerStats'
+          type: array
+          title: Top Owners
+      type: object
+      required:
+      - window_days
+      - active_labs
+      - by_status
+      - created
+      - destroyed
+      - expired
+      - provision_failures
+      - templates
+      - top_owners
+      title: AnalyticsSummary
+    AnalyticsTimeseries:
+      properties:
+        window_days:
+          type: integer
+          title: Window Days
+        points:
+          items:
+            $ref: '#/components/schemas/DailyPoint'
+          type: array
+          title: Points
+      type: object
+      required:
+      - window_days
+      - points
+      title: AnalyticsTimeseries
+    DailyPoint:
+      properties:
+        day:
+          type: string
+          format: date
+          title: Day
+        created:
+          type: integer
+          title: Created
+        destroyed:
+          type: integer
+          title: Destroyed
+        expired:
+          type: integer
+          title: Expired
+      type: object
+      required:
+      - day
+      - created
+      - destroyed
+      - expired
+      title: DailyPoint
+    DestroyRequest:
+      properties:
+        reason:
+          anyOf:
+          - type: string
+            maxLength: 200
+          - type: 'null'
+          title: Reason
+      additionalProperties: false
+      type: object
+      title: DestroyRequest
+    ExtendRequest:
+      properties:
+        hours:
+          type: integer
+          maximum: 720.0
+          exclusiveMinimum: 0.0
+          title: Hours
+          description: Added to the current expiry, capped at max_ttl_hours.
+      additionalProperties: false
+      type: object
+      required:
+      - hours
+      title: ExtendRequest
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    InputType:
+      type: string
+      enum:
+      - string
+      - number
+      - boolean
+      - enum
+      title: InputType
+    Lab:
+      properties:
+        id:
+          type: string
+          format: uuid
+          title: Id
+        name:
+          type: string
+          title: Name
+        template_id:
+          type: string
+          title: Template Id
+        owner_email:
+          type: string
+          title: Owner Email
+        status:
+          $ref: '#/components/schemas/LabStatus'
+        status_detail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status Detail
+        inputs:
+          additionalProperties: true
+          type: object
+          title: Inputs
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        ready_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Ready At
+        expires_at:
+          type: string
+          format: date-time
+          title: Expires At
+        destroy_requested_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Destroy Requested At
+        destroyed_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Destroyed At
+        destroy_reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Destroy Reason
+        extension_count:
+          type: integer
+          title: Extension Count
+        workspace_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Workspace Id
+        workspace_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Workspace Url
+        job_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Job Id
+      type: object
+      required:
+      - id
+      - name
+      - template_id
+      - owner_email
+      - status
+      - inputs
+      - created_at
+      - expires_at
+      - extension_count
+      title: Lab
+    LabCreate:
+      properties:
+        template_id:
+          type: string
+          title: Template Id
+        name:
+          type: string
+          pattern: ^[a-z][a-z0-9-]{2,30}[a-z0-9]$
+          title: Name
+          description: Lowercase, 4-32 chars; also names the workspace.
+        owner_email:
+          type: string
+          pattern: ^[^@\s]+@[^@\s]+\.[^@\s]+$
+          title: Owner Email
+        ttl_hours:
+          anyOf:
+          - type: integer
+            exclusiveMinimum: 0.0
+          - type: 'null'
+          title: Ttl Hours
+          description: Defaults to the template's default_ttl_hours.
+        inputs:
+          additionalProperties:
+            anyOf:
+            - type: string
+            - type: integer
+            - type: number
+            - type: boolean
+          type: object
+          title: Inputs
+          default: {}
+      additionalProperties: false
+      type: object
+      required:
+      - template_id
+      - name
+      - owner_email
+      title: LabCreate
+    LabEvent:
+      properties:
+        type:
+          type: string
+          title: Type
+        actor:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Actor
+        at:
+          type: string
+          format: date-time
+          title: At
+        details:
+          additionalProperties: true
+          type: object
+          title: Details
+      type: object
+      required:
+      - type
+      - actor
+      - at
+      - details
+      title: LabEvent
+    LabEventList:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/LabEvent'
+          type: array
+          title: Items
+      type: object
+      required:
+      - items
+      title: LabEventList
+    LabList:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/Lab'
+          type: array
+          title: Items
+      type: object
+      required:
+      - items
+      title: LabList
+    LabStatus:
+      type: string
+      enum:
+      - pending
+      - provisioning
+      - ready
+      - failed
+      - destroying
+      - destroy_failed
+      - destroyed
+      title: LabStatus
+    OwnerStats:
+      properties:
+        owner_email:
+          type: string
+          title: Owner Email
+        created:
+          type: integer
+          title: Created
+        active:
+          type: integer
+          title: Active
+      type: object
+      required:
+      - owner_email
+      - created
+      - active
+      title: OwnerStats
+    Problem:
+      properties:
+        detail:
+          anyOf:
+          - type: string
+          - items: {}
+            type: array
+          title: Detail
+          description: Message, or a list of field errors for 422 validation failures.
+      type: object
+      required:
+      - detail
+      title: Problem
+    Template:
+      properties:
+        id:
+          type: string
+          pattern: ^[a-z][a-z0-9-]*$
+          title: Id
+        name:
+          type: string
+          title: Name
+        description:
+          type: string
+          title: Description
+          default: ''
+        default_ttl_hours:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Default Ttl Hours
+        max_ttl_hours:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Max Ttl Hours
+          description: Maximum lifetime from creation, including extensions.
+        inputs:
+          items:
+            $ref: '#/components/schemas/TemplateInput'
+          type: array
+          title: Inputs
+          default: []
+      type: object
+      required:
+      - id
+      - name
+      - default_ttl_hours
+      - max_ttl_hours
+      title: Template
+    TemplateInput:
+      properties:
+        name:
+          type: string
+          pattern: ^[a-z][a-z0-9_]*$
+          title: Name
+          description: Terraform variable name.
+        label:
+          type: string
+          title: Label
+        type:
+          $ref: '#/components/schemas/InputType'
+          default: string
+        description:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Description
+        required:
+          type: boolean
+          title: Required
+          default: false
+        default:
+          anyOf:
+          - type: string
+          - type: integer
+          - type: number
+          - type: boolean
+          - type: 'null'
+          title: Default
+        options:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Options
+          description: Allowed values for type enum.
+        pattern:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Pattern
+          description: Regular expression for type string.
+        minimum:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Minimum
+        maximum:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Maximum
+        sensitive:
+          type: boolean
+          title: Sensitive
+          description: Hidden in API responses and Terrakube UI.
+          default: false
+      type: object
+      required:
+      - name
+      - label
+      title: TemplateInput
+      description: One form field. Portals render their form from these.
+    TemplateList:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/Template'
+          type: array
+          title: Items
+      type: object
+      required:
+      - items
+      title: TemplateList
+    TemplateStats:
+      properties:
+        template_id:
+          type: string
+          title: Template Id
+        created:
+          type: integer
+          title: Created
+        active:
+          type: integer
+          title: Active
+        destroyed:
+          type: integer
+          title: Destroyed
+        expired:
+          type: integer
+          title: Expired
+        failed:
+          type: integer
+          title: Failed
+        avg_lifetime_hours:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Avg Lifetime Hours
+        avg_provision_minutes:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Avg Provision Minutes
+      type: object
+      required:
+      - template_id
+      - created
+      - active
+      - destroyed
+      - expired
+      - failed
+      - avg_lifetime_hours
+      - avg_provision_minutes
+      title: TemplateStats
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
+  securitySchemes:
+    HTTPBearer:
+      type: http
+      description: API key issued to the calling portal.
+      scheme: bearer
