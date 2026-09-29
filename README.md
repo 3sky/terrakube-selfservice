@@ -93,3 +93,7 @@ python -m scripts.export_specs   # regenerate openapi.yaml and the catalog/chart
 ```
 
 Tests fail when the committed specs are stale. Releases: push a `vX.Y.Z` tag to publish the image `ghcr.io/<owner>/terrakube-selfservice:X.Y.Z` and the chart `oci://ghcr.io/<owner>/charts/terrakube-selfservice:X.Y.Z`. Pushes to `main` publish an image tagged with the commit SHA.
+
+## License
+
+[MIT](LICENSE)

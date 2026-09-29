@@ -5,6 +5,8 @@ COPY app ./app
 RUN pip install --no-cache-dir --prefix=/install .
 
 FROM python:3.13-slim
+LABEL org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.source="https://github.com/3sky/terrakube-selfservice"
 RUN useradd --uid 10001 --create-home app
 COPY --from=build /install /usr/local
 USER 10001

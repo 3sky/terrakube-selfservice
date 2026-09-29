@@ -5,5 +5,7 @@ type: application
 version: 0.1.0
 appVersion: "0.1.0"
 home: https://github.com/3sky/terrakube-selfservice
+annotations:
+  licenses: MIT
 sources:
   - https://github.com/3sky/terrakube-selfservice
