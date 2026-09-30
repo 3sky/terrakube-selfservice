@@ -3,6 +3,8 @@
 import asyncio
 import json
 import logging
+import secrets
+import string
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -20,7 +22,13 @@ JOB_FAILED = {"failed", "rejected", "cancelled", "unknown"}
 
 
 class TerrakubeError(Exception):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+class WorkspaceGone(TerrakubeError):
+    """The workspace no longer exists in Terrakube (deleted outside the service)."""
 
 
 class TokenSource(Protocol):
@@ -121,7 +129,10 @@ class TerrakubeClient:
             self._tokens.invalidate()
             return await self._request(method, path, body, retry=False)
         if response.status_code >= 400:
-            raise TerrakubeError(f"{method} {path}: HTTP {response.status_code}: {response.text[:300]}")
+            message = f"{method} {path}: HTTP {response.status_code}: {response.text[:300]}"
+            if response.status_code == 404 and "for workspace" in response.text:
+                raise WorkspaceGone(message, 404)
+            raise TerrakubeError(message, response.status_code)
         return response.json() if response.content else None
 
     async def organization_id(self) -> str:
@@ -201,8 +212,19 @@ class TerrakubeClient:
         return (await self._request("GET", f"organization/{org}/job/{job_id}"))["data"]["attributes"]["status"]
 
     async def delete_workspace(self, workspace_id: str) -> None:
+        """Delete the way the Terrakube UI does: mark it deleted and rename it `<name>_DEL_<4 chars>`.
+
+        Terrakube keeps the record (runs, history) and frees the name; its API
+        refuses a plain DELETE.
+        """
         org = await self.organization_id()
-        await self._request("DELETE", f"organization/{org}/workspace/{workspace_id}")
+        path = f"organization/{org}/workspace/{workspace_id}"
+        name = (await self._request("GET", path))["data"]["attributes"]["name"]
+        suffix = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(4))
+        await self._request("PATCH", path, {
+            "data": {"type": "workspace", "id": workspace_id,
+                     "attributes": {"deleted": True, "name": f"{name}_DEL_{suffix}"}},
+        })
 
     async def workspace_url(self, workspace_id: str) -> str:
         return f"{self._ui}/organizations/{await self.organization_id()}/workspaces/{workspace_id}"

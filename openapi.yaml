@@ -4,7 +4,7 @@ info:
   description: Self-service environments (labs) on Terrakube. Pick a template, submit
     its inputs, and the service creates a Terrakube workspace, applies it, and destroys
     it when its TTL expires.
-  version: 0.2.0
+  version: 0.2.1
 paths:
   /v1/templates:
     get:

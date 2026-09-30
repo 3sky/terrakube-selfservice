@@ -123,7 +123,7 @@ def build_app(
 
     app = FastAPI(
         title="Terrakube Self-Service",
-        version="0.2.0",
+        version="0.2.1",
         description=(
             "Self-service environments (labs) on Terrakube. Pick a template, submit its inputs, and the service "
             "creates a Terrakube workspace, applies it, and destroys it when its TTL expires."

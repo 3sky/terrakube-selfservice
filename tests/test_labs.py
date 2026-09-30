@@ -292,3 +292,20 @@ async def test_retry_needs_a_workspace(env):
     lab = (await client.get("/v1/labs")).json()["items"][0]
     response = await client.post(f"/v1/labs/{lab['id']}/retry")
     assert response.status_code == 409 and "create a new one" in response.json()["detail"]
+
+
+async def test_destroy_when_workspace_was_deleted_outside(env):
+    client, service, terrakube = env
+    lab = (await client.post("/v1/labs", json=NEW_LAB)).json()
+    terrakube.jobs["job-1"]["status"] = "completed"
+    await service.reconcile()
+    terrakube.deleted_outside.add("ws-1")
+
+    response = await client.post(f"/v1/labs/{lab['id']}/destroy")
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "destroyed" and "check the cloud account" in body["status_detail"]
+    events = [e["type"] for e in (await client.get(f"/v1/labs/{lab['id']}/events")).json()["items"]]
+    assert events[-1] == "workspace_missing"
+    # The name is free again.
+    assert (await client.post("/v1/labs", json=NEW_LAB)).status_code == 202

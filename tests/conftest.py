@@ -36,6 +36,7 @@ class FakeTerrakube:
         self.jobs: dict[str, dict] = {}
         self.deleted: list[str] = []
         self.fail_create = False
+        self.deleted_outside: set[str] = set()
 
     async def create_workspace(self, **kwargs) -> str:
         if self.fail_create:
@@ -48,6 +49,9 @@ class FakeTerrakube:
         self.workspaces[workspace_id]["variables"].append(kwargs)
 
     async def start_job(self, workspace_id, template_name) -> str:
+        if workspace_id in self.deleted_outside:
+            from app.terrakube import WorkspaceGone
+            raise WorkspaceGone("Unknown identifier for workspace", 404)
         job = f"job-{len(self.jobs) + 1}"
         self.jobs[job] = {"workspace": workspace_id, "template": template_name, "status": "pending"}
         return job

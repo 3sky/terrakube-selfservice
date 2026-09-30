@@ -13,7 +13,7 @@ from .db import RECONCILER_LOCK_ID, Database, NameTaken
 from .models import Lab, LabCreate, LabStatus
 from .identity import Caller
 from .openbao import OpenBaoClient
-from .terrakube import JOB_FAILED, JOB_SUCCEEDED, Terrakube
+from .terrakube import JOB_FAILED, JOB_SUCCEEDED, Terrakube, WorkspaceGone
 
 log = logging.getLogger(__name__)
 
@@ -235,6 +235,17 @@ class LabService:
             ) or await self.get(lab_id)
         try:
             job_id = await self.terrakube.start_job(row["workspace_id"], self.settings.terrakube_destroy_template)
+        except WorkspaceGone:
+            # Deleted in Terrakube by hand: nothing left to run a destroy in.
+            # Close the lab but say plainly that its resources were not checked.
+            log.warning("workspace of lab %s no longer exists in Terrakube", lab_id)
+            return await self.db.update_lab(
+                lab_id, status=LabStatus.destroyed, destroyed_at=now(),
+                status_detail="workspace was deleted in Terrakube before a destroy ran; "
+                "its resources were not destroyed by the service, check the cloud account",
+                event=("workspace_missing", actor, {"workspace_id": row["workspace_id"], "reason": reason}),
+                **requested,
+            ) or await self.get(lab_id)
         except Exception as error:
             log.exception("destroy of lab %s failed to start", lab_id)
             await self.db.update_lab(
