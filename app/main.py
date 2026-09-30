@@ -36,6 +36,35 @@ _ERRORS = {
 }
 
 
+API_DESCRIPTION = """
+Self-service environments (**labs**) on Terrakube. A portal lists templates, the user fills in a form, and the
+service creates a Terrakube workspace, applies it, hands over its access details, and destroys it when its
+lifetime ends.
+
+**Authentication.** Every `/v1` call carries the portal's API key (`Authorization: Bearer <key>`) and the end
+user: a verified OIDC ID token in `X-User-Token` (token mode) or `X-Actor-Email` set by the portal backend from its
+own session (header mode). Call the service from the portal backend only, never from a browser.
+
+**Ownership.** Users see and act on their own labs; another user's lab answers `404`. Admins see all labs and the
+analytics.
+
+**Lifecycle.** `pending` → `provisioning` → `ready` or `failed` → `destroying` → `destroyed` or `destroy_failed`.
+Poll a lab every 15-30 s while it is `pending` or `provisioning`.
+
+**Lifetimes.** Labs expire at `expires_at` and are destroyed automatically; `extend` adds hours up to the
+template's `max_ttl_hours` from creation.
+
+Integration guide: https://github.com/3sky/terrakube-selfservice/blob/main/docs/portal-integration.md
+""".strip()
+
+OPENAPI_TAGS = [
+    {"name": "templates", "description": "The catalog: templates, their form inputs, and cost estimates."},
+    {"name": "labs", "description": "Create labs and follow, extend, retry, destroy and access them. "
+                                    "Scoped to the calling user; admins see all."},
+    {"name": "analytics", "description": "Usage and estimated cost reports. Admins only."},
+]
+
+
 def errors(*codes: int) -> dict[int, dict]:
     return {c: _ERRORS[c] for c in (401, *codes)}
 
@@ -129,10 +158,8 @@ def build_app(
     app = FastAPI(
         title="Terrakube Self-Service",
         version="0.4.0",
-        description=(
-            "Self-service environments (labs) on Terrakube. Pick a template, submit its inputs, and the service "
-            "creates a Terrakube workspace, applies it, and destroys it when its TTL expires."
-        ),
+        description=API_DESCRIPTION,
+        openapi_tags=OPENAPI_TAGS,
         lifespan=lifespan,
         generate_unique_id_function=lambda route: route.name,
     )

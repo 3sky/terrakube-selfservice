@@ -133,7 +133,11 @@ class TemplateList(BaseModel):
 
 
 class LabCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"examples": [{"template_id": "lke-lab", "ttl_hours": 4,
+                                         "inputs": {"node_pool_instance_count": 2}}]},
+    )
 
     template_id: str
     name: str | None = Field(
