@@ -4,7 +4,7 @@ info:
   description: Self-service environments (labs) on Terrakube. Pick a template, submit
     its inputs, and the service creates a Terrakube workspace, applies it, and destroys
     it when its TTL expires.
-  version: 0.2.1
+  version: 0.3.0
 paths:
   /v1/templates:
     get:
@@ -67,6 +67,54 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /v1/templates/{template_id}/estimate:
+    post:
+      tags:
+      - templates
+      summary: Estimate a lab's cost before creating it
+      description: Hourly and total list-price estimate for these form inputs; 404
+        when the template has no cost model.
+      operationId: estimate_template
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: template_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Template Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EstimateRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Estimate'
+        '401':
+          description: Missing or invalid API key or user identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Not found, or not visible to this user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
   /v1/labs:
     post:
       tags:
@@ -767,6 +815,75 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Problem'
+  /v1/analytics/costs:
+    get:
+      tags:
+      - analytics
+      summary: Estimated cost per owner and template (admins)
+      description: Lab-hours and estimated cost in the window, per owner (split by
+        template) and per template.
+      operationId: analytics_costs
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: days
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 365
+          minimum: 1
+          default: 30
+          title: Days
+      - name: X-Actor-Email
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Header mode: the signed-in user, set by the portal backend
+            from its own session. Ignored in token mode.'
+          title: X-Actor-Email
+        description: 'Header mode: the signed-in user, set by the portal backend from
+          its own session. Ignored in token mode.'
+      - name: X-User-Token
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Token mode: the signed-in user''s OIDC ID token, verified
+            by the service.'
+          title: X-User-Token
+        description: 'Token mode: the signed-in user''s OIDC ID token, verified by
+          the service.'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CostReport'
+        '401':
+          description: Missing or invalid API key or user identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: The user may not do this
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
   /v1/analytics/timeseries:
     get:
       tags:
@@ -898,6 +1015,86 @@ components:
       - window_days
       - points
       title: AnalyticsTimeseries
+    CostItem:
+      properties:
+        label:
+          type: string
+          title: Label
+        hourly:
+          type: number
+          title: Hourly
+      type: object
+      required:
+      - label
+      - hourly
+      title: CostItem
+    CostLine:
+      properties:
+        template_id:
+          type: string
+          title: Template Id
+        labs:
+          type: integer
+          title: Labs
+        lab_hours:
+          type: number
+          title: Lab Hours
+        estimated_cost:
+          type: number
+          title: Estimated Cost
+      type: object
+      required:
+      - template_id
+      - labs
+      - lab_hours
+      - estimated_cost
+      title: CostLine
+    CostReport:
+      properties:
+        window_days:
+          type: integer
+          title: Window Days
+        currency:
+          type: string
+          title: Currency
+        labs:
+          type: integer
+          title: Labs
+        lab_hours:
+          type: number
+          title: Lab Hours
+        estimated_cost:
+          type: number
+          title: Estimated Cost
+        unpriced_labs:
+          type: integer
+          title: Unpriced Labs
+          description: Labs that ran but have no price (template without a cost model).
+        owners:
+          items:
+            $ref: '#/components/schemas/OwnerCost'
+          type: array
+          title: Owners
+        templates:
+          items:
+            $ref: '#/components/schemas/CostLine'
+          type: array
+          title: Templates
+        method:
+          type: string
+          title: Method
+      type: object
+      required:
+      - window_days
+      - currency
+      - labs
+      - lab_hours
+      - estimated_cost
+      - unpriced_labs
+      - owners
+      - templates
+      - method
+      title: CostReport
     DailyPoint:
       properties:
         day:
@@ -931,6 +1128,56 @@ components:
       additionalProperties: false
       type: object
       title: DestroyRequest
+    Estimate:
+      properties:
+        currency:
+          type: string
+          title: Currency
+        hourly:
+          type: number
+          title: Hourly
+        ttl_hours:
+          type: integer
+          title: Ttl Hours
+        total:
+          type: number
+          title: Total
+          description: hourly × ttl_hours
+        items:
+          items:
+            $ref: '#/components/schemas/CostItem'
+          type: array
+          title: Items
+      type: object
+      required:
+      - currency
+      - hourly
+      - ttl_hours
+      - total
+      - items
+      title: Estimate
+    EstimateRequest:
+      properties:
+        inputs:
+          additionalProperties:
+            anyOf:
+            - type: string
+            - type: integer
+            - type: number
+            - type: boolean
+          type: object
+          title: Inputs
+          default: {}
+        ttl_hours:
+          anyOf:
+          - type: integer
+            exclusiveMinimum: 0.0
+          - type: 'null'
+          title: Ttl Hours
+          description: Defaults to the template's default_ttl_hours.
+      additionalProperties: false
+      type: object
+      title: EstimateRequest
     ExtendRequest:
       properties:
         hours:
@@ -1021,6 +1268,24 @@ components:
         extension_count:
           type: integer
           title: Extension Count
+        currency:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Currency
+        estimated_hourly_cost:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Estimated Hourly Cost
+          description: Snapshot taken at creation.
+        estimated_cost:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Estimated Cost
+          description: 'Cost so far: hourly × hours from creation to destruction (or
+            now); 0 if never ready.'
         workspace_id:
           anyOf:
           - type: string
@@ -1171,6 +1436,33 @@ components:
       - destroy_failed
       - destroyed
       title: LabStatus
+    OwnerCost:
+      properties:
+        owner_email:
+          type: string
+          title: Owner Email
+        labs:
+          type: integer
+          title: Labs
+        lab_hours:
+          type: number
+          title: Lab Hours
+        estimated_cost:
+          type: number
+          title: Estimated Cost
+        templates:
+          items:
+            $ref: '#/components/schemas/CostLine'
+          type: array
+          title: Templates
+      type: object
+      required:
+      - owner_email
+      - labs
+      - lab_hours
+      - estimated_cost
+      - templates
+      title: OwnerCost
     OwnerStats:
       properties:
         owner_email:

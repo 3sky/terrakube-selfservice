@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS lab_events (
 );
 CREATE INDEX IF NOT EXISTS lab_events_lab ON lab_events (lab_id, at);
 CREATE INDEX IF NOT EXISTS lab_events_type_at ON lab_events (type, at);
+
+-- 0.3.0: hourly cost estimate, snapshotted when the lab is created.
+ALTER TABLE labs ADD COLUMN IF NOT EXISTS hourly_cost double precision;
+ALTER TABLE labs ADD COLUMN IF NOT EXISTS currency text;
 """
 
 # Only one replica runs the reconciler at a time.
@@ -75,6 +79,7 @@ class Database:
     async def insert_lab(
         self, *, lab_id: UUID, name: str, template_id: str, owner_email: str,
         inputs: dict[str, str], expires_at: datetime, actor: str | None,
+        hourly_cost: float | None = None, currency: str | None = None,
     ) -> dict[str, Any]:
         from psycopg.errors import UniqueViolation
 
@@ -82,12 +87,15 @@ class Database:
             async with self.pool.connection() as conn, conn.transaction():
                 row = await (await conn.execute(
                     """
-                    INSERT INTO labs (id, name, template_id, owner_email, inputs, status, expires_at)
-                    VALUES (%(id)s, %(name)s, %(template_id)s, %(owner)s, %(inputs)s, 'pending', %(expires_at)s)
+                    INSERT INTO labs (id, name, template_id, owner_email, inputs, status, expires_at,
+                                      hourly_cost, currency)
+                    VALUES (%(id)s, %(name)s, %(template_id)s, %(owner)s, %(inputs)s, 'pending', %(expires_at)s,
+                            %(hourly_cost)s, %(currency)s)
                     RETURNING *
                     """,
                     {"id": lab_id, "name": name, "template_id": template_id, "owner": owner_email,
-                     "inputs": Jsonb(inputs), "expires_at": expires_at},
+                     "inputs": Jsonb(inputs), "expires_at": expires_at, "hourly_cost": hourly_cost,
+                     "currency": currency},
                 )).fetchone()
                 await conn.execute(
                     "INSERT INTO lab_events (lab_id, type, actor, details) VALUES (%s, 'created', %s, %s)",
@@ -233,6 +241,45 @@ class Database:
             FROM generate_series(date_trunc('day', %(since)s::timestamptz), date_trunc('day', now()), interval '1 day') d
             LEFT JOIN lab_events e ON date_trunc('day', e.at) = d
             GROUP BY d ORDER BY d
+            """,
+            {"since": since},
+        )
+
+    async def unpriced_labs(self) -> list[dict[str, Any]]:
+        return await self._all("SELECT id, template_id, inputs FROM labs WHERE hourly_cost IS NULL")
+
+    async def set_price(self, lab_id: UUID, hourly_cost: float, currency: str) -> None:
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                "UPDATE labs SET hourly_cost = %s, currency = %s WHERE id = %s AND hourly_cost IS NULL",
+                (hourly_cost, currency, lab_id),
+            )
+
+    async def cost_lines(self, since: datetime) -> list[dict[str, Any]]:
+        """Per owner and template: labs, hours inside the window, and estimated cost.
+
+        Hours run from creation to destruction (or now), clipped to the window.
+        Only labs that reached `ready` are charged; see the report's `method`.
+        """
+        return await self._all(
+            """
+            WITH clipped AS (
+              SELECT owner_email, template_id, hourly_cost, ready_at IS NOT NULL AS charged,
+                GREATEST(0, EXTRACT(EPOCH FROM
+                  LEAST(COALESCE(destroyed_at, now()), now()) - GREATEST(created_at, %(since)s)
+                ) / 3600) AS hours
+              FROM labs
+              WHERE COALESCE(destroyed_at, now()) >= %(since)s
+            )
+            SELECT owner_email, template_id,
+              count(*)::int                                                                  AS labs,
+              round(sum(hours)::numeric, 2)::float8                                          AS lab_hours,
+              round(sum(CASE WHEN charged THEN hours * COALESCE(hourly_cost, 0) ELSE 0 END)::numeric, 2)::float8
+                                                                                             AS estimated_cost,
+              count(*) FILTER (WHERE charged AND hourly_cost IS NULL)::int                   AS unpriced
+            FROM clipped
+            GROUP BY owner_email, template_id
+            ORDER BY estimated_cost DESC, lab_hours DESC, owner_email, template_id
             """,
             {"since": since},
         )

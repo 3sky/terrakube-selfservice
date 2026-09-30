@@ -309,3 +309,77 @@ async def test_destroy_when_workspace_was_deleted_outside(env):
     assert events[-1] == "workspace_missing"
     # The name is free again.
     assert (await client.post("/v1/labs", json=NEW_LAB)).status_code == 202
+
+
+async def test_estimate_before_create(env):
+    client, _, _ = env
+    body = (await client.post("/v1/templates/aws-lab/estimate", json={"inputs": {"customer": "acme", "size": 2}})).json()
+    assert body == {"currency": "USD", "hourly": 0.087, "ttl_hours": 24, "total": 2.09,
+                    "items": [{"label": "Nodes", "hourly": 0.072}, {"label": "NodeBalancer", "hourly": 0.015}]}
+    assert (await client.post("/v1/templates/aws-lab/estimate", json={"inputs": {}})).status_code == 422
+    assert (await client.post("/v1/templates/nope/estimate", json={})).status_code == 404
+
+
+async def test_cost_report_per_owner_and_template(env):
+    client, service, terrakube = env
+    lab = (await client.post("/v1/labs", json=NEW_LAB)).json()
+    assert lab["estimated_hourly_cost"] == 0.051 and lab["currency"] == "USD"
+    bob_body = {**NEW_LAB, "name": "bob-lab", "owner_email": "bob@example.com"}
+    assert (await client.post("/v1/labs", json=bob_body, headers=BOB)).status_code == 202
+    terrakube.jobs["job-1"]["status"] = "completed"  # alice's lab becomes ready, bob's never does
+    terrakube.jobs["job-2"]["status"] = "failed"
+    await service.reconcile()
+    await age(service.db, lab["id"], 10)  # alice's lab has now run 10 hours
+    for row in await service.db.list_labs(owner=None, status=None, template_id=None, include_destroyed=True, limit=10):
+        if row["name"] == "bob-lab":
+            await age(service.db, row["id"], 5)
+
+    alice_lab = (await client.get(f"/v1/labs/{lab['id']}")).json()
+    assert round(alice_lab["estimated_cost"], 2) == 0.51
+
+    assert (await client.get("/v1/analytics/costs")).status_code == 403
+    report = (await client.get("/v1/analytics/costs?days=30", headers=ADMIN)).json()
+    assert report["currency"] == "USD" and report["labs"] == 2 and report["unpriced_labs"] == 0
+    assert report["estimated_cost"] == 0.51 and round(report["lab_hours"]) == 15
+    alice, bob = report["owners"]
+    assert alice["owner_email"] == "alice@example.com" and alice["estimated_cost"] == 0.51
+    assert alice["templates"] == [{"template_id": "aws-lab", "labs": 1, "lab_hours": 10.0, "estimated_cost": 0.51}]
+    assert bob["owner_email"] == "bob@example.com" and bob["estimated_cost"] == 0 and round(bob["lab_hours"]) == 5
+    assert report["templates"][0]["labs"] == 2
+
+    # The window clips hours: of a 50-hour-old lab, only the last 24 count in a 1-day report.
+    await age(service.db, lab["id"], 40)  # now 50 hours old
+    day = (await client.get("/v1/analytics/costs?days=1", headers=ADMIN)).json()
+    assert round(day["owners"][0]["lab_hours"]) == 24 and day["owners"][0]["estimated_cost"] == round(24 * 0.051, 2)
+
+
+async def test_backfill_prices_existing_labs(env):
+    client, service, _ = env
+    lab = (await client.post("/v1/labs", json=NEW_LAB)).json()
+    async with service.db.pool.connection() as conn:
+        await conn.execute("UPDATE labs SET hourly_cost = NULL, currency = NULL")
+    assert (await client.get(f"/v1/labs/{lab['id']}")).json()["estimated_hourly_cost"] is None
+    assert await service.backfill_prices() == 1
+    assert (await client.get(f"/v1/labs/{lab['id']}")).json()["estimated_hourly_cost"] == 0.051
+
+
+def test_catalog_rejects_bad_cost_models(tmp_path):
+    from app.catalog import main
+
+    base = ("currency: USD\nprices: {small: 0.01}\ntemplates:\n"
+            "  - id: t\n    name: T\n    default_ttl_hours: 1\n    max_ttl_hours: 2\n"
+            "    source: {repository: https://example.com/r}\n"
+            "    inputs:\n"
+            "      - {name: size, label: Size, type: enum, options: [small, large]}\n"
+            "      - {name: n, label: N, type: string}\n")
+    for cost, ok in [
+        ("[{label: VM, price_from: size}]", False),     # no price for 'large'
+        ("[{label: VM, price: missing}]", False),       # unknown price key
+        ("[{label: VM, price: small, quantity_from: n}]", False),  # quantity from a string input
+        ("[{label: VM, price: small, when: size}]", False),        # when on a non-boolean
+        ("[{label: VM}]", False),                        # no price at all
+        ("[{label: VM, price: small, quantity: 3}]", True),
+    ]:
+        path = tmp_path / "c.yaml"
+        path.write_text(base + f"    cost: {cost}\n")
+        assert (main(["check", str(path)]) == 0) is ok, cost

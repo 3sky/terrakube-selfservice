@@ -7,6 +7,81 @@
     }
   },
   "$defs": {
+    "CostComponent": {
+      "additionalProperties": false,
+      "description": "One billable part of a lab, priced from the catalog's `prices` (per hour).\n\nThe unit price is `prices[price]`, or `prices[<value of the input named in\nprice_from>]` (the first of several inputs that has a value). It is\nmultiplied by `quantity` and by the numeric input `quantity_from`, and only\ncounts when the boolean input `when` is true.",
+      "properties": {
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "price": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Price"
+        },
+        "price_from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Price From"
+        },
+        "quantity": {
+          "default": 1,
+          "exclusiveMinimum": 0,
+          "title": "Quantity",
+          "type": "number"
+        },
+        "quantity_from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quantity From"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "title": "CostComponent",
+      "type": "object"
+    },
     "InputType": {
       "enum": [
         "string",
@@ -179,7 +254,7 @@
       "type": "object"
     },
     "TemplateSpec": {
-      "description": "Catalog entry; source, env and variables are internal and not returned by the API.",
+      "description": "Catalog entry; source, env, variables and cost are internal and not returned by the API.",
       "properties": {
         "id": {
           "pattern": "^[a-z][a-z0-9-]*$",
@@ -232,6 +307,14 @@
           "description": "Fixed Terraform variables.",
           "title": "Variables",
           "type": "object"
+        },
+        "cost": {
+          "description": "Billable parts, for cost estimates.",
+          "items": {
+            "$ref": "#/$defs/CostComponent"
+          },
+          "title": "Cost",
+          "type": "array"
         }
       },
       "required": [
@@ -248,6 +331,20 @@
       "additionalProperties": false,
       "description": "The deployment's catalog file (CATALOG_PATH). See catalog.schema.json.",
       "properties": {
+        "currency": {
+          "default": "USD",
+          "description": "Currency of `prices`, used in estimates and reports.",
+          "title": "Currency",
+          "type": "string"
+        },
+        "prices": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "description": "Price per hour by key (instance type, add-on); referenced by template cost.",
+          "title": "Prices",
+          "type": "object"
+        },
         "templates": {
           "items": {
             "$ref": "#/$defs/TemplateSpec"

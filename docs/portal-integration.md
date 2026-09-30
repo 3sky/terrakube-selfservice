@@ -45,6 +45,7 @@ A request without a valid identity gets `401`. In token mode, `X-Actor-Email` is
 - `sensitive` inputs: use a password field. The service never returns their values.
 - Offer a lifetime between 1 hour and `max_ttl_hours`, defaulting to `default_ttl_hours`.
 - The service validates everything again. Show its `422` messages next to the form.
+- **Show the cost** before submitting: call `POST /v1/templates/{id}/estimate` with the current inputs and TTL whenever they change (debounced), and show `hourly` and `total` with `currency`. `404` means the template has no cost model; hide the estimate.
 
 ### Create
 
@@ -62,6 +63,7 @@ POST /v1/labs
 - `GET /v1/labs` lists the caller's labs (admins: everyone's; filter with `owner_email`). `?include_destroyed=true` adds history.
 - `GET /v1/labs/{id}` while `pending` or `provisioning`: **poll every 15 to 30 seconds**, and stop when the status is final for now (`ready`, `failed`, `destroyed`, `destroy_failed`). Provisioning takes minutes (LKE about 5 to 10).
 - Show `expires_at` in the user's time zone, `status_detail`, and `workspace_url` for users who can open Terrakube.
+- Show `estimated_cost` (so far) and `estimated_hourly_cost` with `currency`, labelled as an estimate. Extending a lab adds hours at the same hourly price.
 
 | Status | Show | Offer |
 |---|---|---|
@@ -92,6 +94,8 @@ POST /v1/labs
 ### Admin views
 
 `GET /v1/analytics/summary?days=30` and `/timeseries` (admins only, `403` otherwise) for a usage dashboard: labs per template and owner, expiries, failures, lifetimes, time to ready.
+
+`GET /v1/analytics/costs?days=30` (admins only) for a cost view: totals, then each owner with lab count, lab-hours and estimated cost split by template, and per-template totals. Show `method` next to the numbers, so readers know they are list-price estimates.
 
 ## 4. Errors
 

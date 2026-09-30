@@ -11,6 +11,7 @@ portal ──HTTP──► terrakube-selfservice ──JSON:API──► Terraku
 - **Templates with forms**: each template is a Terraform/OpenTofu module in Git, plus typed inputs (string, number, boolean, enum; required, defaults, patterns, ranges) that portals render as a form.
 - **TTL policy**: default and maximum lifetime per template; labs can be extended up to the maximum and are destroyed automatically, then their workspace is deleted.
 - **Analytics**: labs per template and owner, expiries, failures, lifetimes, time to ready, daily series.
+- **Cost estimates**: list prices from the catalog, shown before a lab is created, per lab, and per owner and template.
 - **Audit trail**: every state change with the acting user.
 
 The API contract is [`openapi.yaml`](openapi.yaml).
@@ -20,6 +21,7 @@ The API contract is [`openapi.yaml`](openapi.yaml).
 | Endpoint | Purpose |
 |---|---|
 | `GET /v1/templates`, `GET /v1/templates/{id}` | Templates and their form inputs |
+| `POST /v1/templates/{id}/estimate` | Estimated hourly and total cost for given inputs and TTL |
 | `POST /v1/labs` | Create a lab: `template_id`, `owner_email`, optional `name` (default `<owner>-<5 random chars>`), `ttl_hours`, `inputs` |
 | `GET /v1/labs`, `GET /v1/labs/{id}` | The caller's labs and their status (admins: all labs) |
 | `GET /v1/labs/{id}/access` | Access details the template published (kubeconfig, passwords, URLs); owner or admin, audited |
@@ -28,6 +30,7 @@ The API contract is [`openapi.yaml`](openapi.yaml).
 | `POST /v1/labs/{id}/destroy` | Destroy now; also retries a `destroy_failed` lab |
 | `GET /v1/labs/{id}/events` | Audit trail |
 | `GET /v1/analytics/summary`, `GET /v1/analytics/timeseries` | Usage analytics (`?days=30`), admins only |
+| `GET /v1/analytics/costs` | Lab-hours and estimated cost per owner (split by template) and per template (`?days=30`), admins only |
 
 Requests carry `Authorization: Bearer <api key>` (the portal) and the end user's identity: a verified OIDC ID token in `X-User-Token` (token mode, recommended) or `X-Actor-Email` set by the portal backend from its own session (header mode). Users only see and act on their own labs; `ADMIN_EMAILS` see all of them. **Portals must follow [docs/portal-integration.md](docs/portal-integration.md)**: backend-only calls, how to pass the user, and how to handle access details.
 
@@ -58,6 +61,7 @@ templates:
 
 - `inputs` become Terraform variables; `env` and `variables` add fixed ENV and Terraform variables to every lab.
 - Every lab also gets `TF_VAR_lab_id`, `TF_VAR_lab_name`, `TF_VAR_lab_owner` and `TF_VAR_lab_expires_at`. Declare them in the module to tag resources.
+- **Costs**: `prices` (per hour, in `currency`) plus a `cost` list per template. Each part is a fixed price (`price: nodebalancer`) or a price chosen by an input's value (`price_from: node_pool_instance_type`), times `quantity` and an optional number input (`quantity_from: node_pool_instance_count`), counted only when a boolean input is true (`when: control_plane_ha`). The catalog check rejects prices that are missing for an input's options. Estimates use list prices: no discounts, taxes or transfer overage. Each lab stores its hourly price when created; reports charge lab-hours from creation to destruction, only for labs that reached `ready`.
 - Validate a catalog before deploying: `python -m app.catalog check catalog.yaml` (also available in the image). [`catalog.schema.json`](catalog.schema.json) gives editor completion, and the Helm chart rejects an invalid `catalog` value at install time.
 - The service validates the catalog at startup and refuses to start on errors, so a bad change never replaces a running version.
 

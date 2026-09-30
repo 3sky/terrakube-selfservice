@@ -79,12 +79,38 @@ class TemplateSource(BaseModel):
     )
 
 
+class CostComponent(BaseModel):
+    """One billable part of a lab, priced from the catalog's `prices` (per hour).
+
+    The unit price is `prices[price]`, or `prices[<value of the input named in
+    price_from>]` (the first of several inputs that has a value). It is
+    multiplied by `quantity` and by the numeric input `quantity_from`, and only
+    counts when the boolean input `when` is true.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str
+    price: str | None = None
+    price_from: str | list[str] | None = None
+    quantity: float = Field(default=1, gt=0)
+    quantity_from: str | None = None
+    when: str | None = None
+
+    @model_validator(mode="after")
+    def _one_price(self) -> "CostComponent":
+        if (self.price is None) == (self.price_from is None):
+            raise ValueError(f"cost {self.label!r}: set exactly one of price, price_from")
+        return self
+
+
 class TemplateSpec(Template):
-    """Catalog entry; source, env and variables are internal and not returned by the API."""
+    """Catalog entry; source, env, variables and cost are internal and not returned by the API."""
 
     source: TemplateSource
     env: dict[str, str] = Field(default_factory=dict, description="Fixed ENV variables for every lab.")
     variables: dict[str, str] = Field(default_factory=dict, description="Fixed Terraform variables.")
+    cost: list[CostComponent] = Field(default_factory=list, description="Billable parts, for cost estimates.")
 
 
 class CatalogFile(BaseModel):
@@ -92,6 +118,10 @@ class CatalogFile(BaseModel):
 
     model_config = ConfigDict(extra="forbid", title="Terrakube Self-Service catalog")
 
+    currency: str = Field(default="USD", description="Currency of `prices`, used in estimates and reports.")
+    prices: dict[str, float] = Field(
+        default_factory=dict, description="Price per hour by key (instance type, add-on); referenced by template cost.",
+    )
     templates: list[TemplateSpec]
 
 
@@ -134,6 +164,11 @@ class Lab(BaseModel):
     destroyed_at: datetime | None = None
     destroy_reason: str | None = None
     extension_count: int
+    currency: str | None = None
+    estimated_hourly_cost: float | None = Field(default=None, description="Snapshot taken at creation.")
+    estimated_cost: float | None = Field(
+        default=None, description="Cost so far: hourly × hours from creation to destruction (or now); 0 if never ready.",
+    )
     workspace_id: str | None = None
     workspace_url: str | None = None
     job_id: str | None = None
@@ -141,6 +176,53 @@ class Lab(BaseModel):
 
 class LabList(BaseModel):
     items: list[Lab]
+
+
+class EstimateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    inputs: dict[str, InputValue] = {}
+    ttl_hours: int | None = Field(default=None, gt=0, description="Defaults to the template's default_ttl_hours.")
+
+
+class CostItem(BaseModel):
+    label: str
+    hourly: float
+
+
+class Estimate(BaseModel):
+    currency: str
+    hourly: float
+    ttl_hours: int
+    total: float = Field(description="hourly × ttl_hours")
+    items: list[CostItem]
+
+
+class CostLine(BaseModel):
+    template_id: str
+    labs: int
+    lab_hours: float
+    estimated_cost: float
+
+
+class OwnerCost(BaseModel):
+    owner_email: str
+    labs: int
+    lab_hours: float
+    estimated_cost: float
+    templates: list[CostLine]
+
+
+class CostReport(BaseModel):
+    window_days: int
+    currency: str
+    labs: int
+    lab_hours: float
+    estimated_cost: float
+    unpriced_labs: int = Field(description="Labs that ran but have no price (template without a cost model).")
+    owners: list[OwnerCost]
+    templates: list[CostLine]
+    method: str
 
 
 class LabAccess(BaseModel):

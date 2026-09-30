@@ -10,7 +10,7 @@ from uuid import UUID
 from .catalog import Catalog, public_inputs, resolve_inputs
 from .config import Settings
 from .db import RECONCILER_LOCK_ID, Database, NameTaken
-from .models import Lab, LabCreate, LabStatus
+from .models import CostLine, CostReport, Estimate, EstimateRequest, Lab, LabCreate, LabStatus, OwnerCost
 from .identity import Caller
 from .openbao import OpenBaoClient
 from .terrakube import JOB_FAILED, JOB_SUCCEEDED, Terrakube, WorkspaceGone
@@ -53,7 +53,79 @@ class LabService:
 
     def to_model(self, row: dict[str, Any]) -> Lab:
         template = self.catalog.get(row["template_id"])
-        return Lab.model_validate({**row, "inputs": public_inputs(template, row["inputs"])})
+        hourly = row.get("hourly_cost")
+        cost = None
+        if hourly is not None:
+            end = row["destroyed_at"] or now()
+            hours = max((end - row["created_at"]).total_seconds() / 3600, 0) if row["ready_at"] else 0
+            cost = round(hours * hourly, 2)
+        return Lab.model_validate({
+            **row, "inputs": public_inputs(template, row["inputs"]),
+            "estimated_hourly_cost": hourly, "estimated_cost": cost,
+        })
+
+    # --- cost --------------------------------------------------------------
+
+    def estimate(self, template_id: str, request: EstimateRequest) -> Estimate:
+        template = self.catalog.get(template_id)
+        if template is None:
+            raise LabError(404, "template not found")
+        values, errors = resolve_inputs(template, request.inputs)
+        if errors:
+            raise LabError(422, "; ".join(errors))
+        priced = self.catalog.estimate(template, values)
+        if priced is None:
+            raise LabError(404, f"no cost model for template {template_id}")
+        hourly, items = priced
+        ttl = request.ttl_hours or template.default_ttl_hours
+        return Estimate(currency=self.catalog.currency, hourly=round(hourly, 4), ttl_hours=ttl,
+                        total=round(hourly * ttl, 2), items=items)
+
+    async def backfill_prices(self) -> int:
+        """Price labs created before their template had a cost model (or before 0.3.0)."""
+        priced = 0
+        for row in await self.db.unpriced_labs():
+            template = self.catalog.get(row["template_id"])
+            result = self.catalog.estimate(template, row["inputs"]) if template else None
+            if result is not None:
+                await self.db.set_price(row["id"], result[0], self.catalog.currency)
+                priced += 1
+        return priced
+
+    async def cost_report(self, days: int) -> CostReport:
+        lines = await self.db.cost_lines(now() - timedelta(days=days))
+        owners: dict[str, OwnerCost] = {}
+        templates: dict[str, CostLine] = {}
+        for line in lines:
+            item = CostLine(**{k: line[k] for k in ("template_id", "labs", "lab_hours", "estimated_cost")})
+            owner = owners.setdefault(line["owner_email"], OwnerCost(
+                owner_email=line["owner_email"], labs=0, lab_hours=0, estimated_cost=0, templates=[]))
+            owner.templates.append(item)
+            owner.labs += item.labs
+            owner.lab_hours = round(owner.lab_hours + item.lab_hours, 2)
+            owner.estimated_cost = round(owner.estimated_cost + item.estimated_cost, 2)
+            total = templates.setdefault(item.template_id, CostLine(
+                template_id=item.template_id, labs=0, lab_hours=0, estimated_cost=0))
+            total.labs += item.labs
+            total.lab_hours = round(total.lab_hours + item.lab_hours, 2)
+            total.estimated_cost = round(total.estimated_cost + item.estimated_cost, 2)
+        by_cost = lambda x: (-x.estimated_cost, -x.lab_hours)  # noqa: E731
+        return CostReport(
+            window_days=days,
+            currency=self.catalog.currency,
+            labs=sum(o.labs for o in owners.values()),
+            lab_hours=round(sum(o.lab_hours for o in owners.values()), 2),
+            estimated_cost=round(sum(o.estimated_cost for o in owners.values()), 2),
+            unpriced_labs=sum(line["unpriced"] for line in lines),
+            owners=sorted(owners.values(), key=by_cost),
+            templates=sorted(templates.values(), key=by_cost),
+            method=(
+                "List prices from the catalog times lab-hours. A lab's hours run from creation to destruction "
+                "(or now) within the window; only labs that reached ready are charged, at the hourly price "
+                "snapshotted when they were created. Excludes taxes, transfer overage and resources a failed "
+                "run left behind."
+            ),
+        )
 
     async def get(self, lab_id: UUID) -> dict[str, Any]:
         row = await self.db.get_lab(lab_id)
@@ -88,7 +160,11 @@ class LabService:
 
         lab_id = uuid.uuid4()
         created = now()
-        name = await self._insert(request, lab_id, template.id, values, created + timedelta(hours=ttl), actor)
+        priced = self.catalog.estimate(template, values)
+        name = await self._insert(
+            request, lab_id, template.id, values, created + timedelta(hours=ttl), actor,
+            hourly_cost=priced[0] if priced else None,
+        )
 
         workspace_id: str | None = None
         try:
@@ -138,7 +214,7 @@ class LabService:
 
     async def _insert(
         self, request: LabCreate, lab_id: UUID, template_id: str, values: dict[str, str],
-        expires_at: datetime, actor: str | None,
+        expires_at: datetime, actor: str | None, hourly_cost: float | None = None,
     ) -> str:
         """Record the lab; a generated name is retried on the rare collision."""
         attempts = 1 if request.name else NAME_ATTEMPTS
@@ -148,6 +224,7 @@ class LabService:
                 await self.db.insert_lab(
                     lab_id=lab_id, name=name, template_id=template_id, owner_email=request.owner_email,
                     inputs=values, expires_at=expires_at, actor=actor,
+                    hourly_cost=hourly_cost, currency=self.catalog.currency if hourly_cost is not None else None,
                 )
                 return name
             except NameTaken:

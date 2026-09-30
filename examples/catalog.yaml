@@ -8,6 +8,16 @@
 # `inputs` become Terraform variables and describe the form a portal shows.
 # Every lab also receives TF_VAR_lab_id, TF_VAR_lab_name, TF_VAR_lab_owner
 # and TF_VAR_lab_expires_at; declare them in the module to use them.
+#
+# Cost estimates: `prices` are per hour in `currency`; each template's `cost`
+# lists its billable parts in terms of its inputs. Illustrative AWS on-demand
+# prices below; use your provider's current list prices.
+currency: USD
+prices:
+  t3.micro: 0.0104
+  t3.small: 0.0208
+  t3.medium: 0.0416
+  nat-gateway: 0.045
 templates:
   - id: aws-lab
     name: AWS lab
@@ -39,3 +49,8 @@ templates:
         type: string
         required: true
         pattern: "^[A-Za-z0-9 ._-]{2,64}$"
+    cost:
+      - label: Test instance
+        price_from: instance_type
+      - label: NAT gateway
+        price: nat-gateway

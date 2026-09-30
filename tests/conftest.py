@@ -88,7 +88,11 @@ CATALOG = Catalog([TemplateSpec.model_validate({
         {"name": "customer", "label": "Customer", "required": True, "pattern": "^[a-z]+$"},
         {"name": "secret", "label": "Secret", "sensitive": True},
     ],
-})])
+    "cost": [
+        {"label": "Nodes", "price": "node", "quantity_from": "size"},
+        {"label": "NodeBalancer", "price": "nodebalancer"},
+    ],
+})], prices={"node": 0.036, "nodebalancer": 0.015}, currency="USD")
 
 
 @pytest_asyncio.fixture(scope="session")

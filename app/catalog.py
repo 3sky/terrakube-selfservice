@@ -3,11 +3,13 @@ from pathlib import Path
 
 import yaml
 
-from .models import CatalogFile, InputType, InputValue, TemplateSpec
+from .models import CatalogFile, CostItem, InputType, InputValue, TemplateSpec
 
 
 class Catalog:
-    def __init__(self, templates: list[TemplateSpec]):
+    def __init__(self, templates: list[TemplateSpec], prices: dict[str, float] | None = None, currency: str = "USD"):
+        self.prices = prices or {}
+        self.currency = currency
         ids = [t.id for t in templates]
         duplicates = {i for i in ids if ids.count(i) > 1}
         if duplicates:
@@ -18,7 +20,10 @@ class Catalog:
     def load(cls, path: str) -> "Catalog":
         """Load the deployment's catalog; raises on any schema or consistency error."""
         data = yaml.safe_load(Path(path).read_text()) or {}
-        catalog = cls(CatalogFile.model_validate(data).templates)
+        parsed = CatalogFile.model_validate(data)
+        catalog = cls(parsed.templates, parsed.prices, parsed.currency)
+        for template in catalog.all():
+            catalog._check_cost(template)
         for template in catalog.all():
             for spec in template.inputs:
                 if spec.default is not None:
@@ -28,11 +33,54 @@ class Catalog:
                         raise ValueError(f"template {template.id}: default of {errors[0]}")
         return catalog
 
+    def _check_cost(self, template: TemplateSpec) -> None:
+        inputs = {i.name: i for i in template.inputs}
+        for c in template.cost:
+            where = f"template {template.id}, cost {c.label!r}"
+            if c.price is not None and c.price not in self.prices:
+                raise ValueError(f"{where}: price {c.price!r} is not in prices")
+            for name in _names(c.price_from):
+                spec = inputs.get(name)
+                if spec is None:
+                    raise ValueError(f"{where}: price_from input {name!r} does not exist")
+                missing = [o for o in (spec.options or []) if o not in self.prices]
+                if missing:
+                    raise ValueError(f"{where}: no price for {name} options {missing}")
+            if c.quantity_from and (c.quantity_from not in inputs or inputs[c.quantity_from].type != InputType.number):
+                raise ValueError(f"{where}: quantity_from must name a number input")
+            if c.when and (c.when not in inputs or inputs[c.when].type != InputType.boolean):
+                raise ValueError(f"{where}: when must name a boolean input")
+
+    def estimate(self, template: TemplateSpec, values: dict[str, str]) -> tuple[float, list[CostItem]] | None:
+        """Hourly cost of a lab with these resolved inputs; None when the template has no cost model."""
+        if not template.cost:
+            return None
+        items = []
+        for c in template.cost:
+            if c.when and values.get(c.when) != "true":
+                continue
+            if c.price is not None:
+                unit = self.prices[c.price]
+            else:
+                key = next((values[n] for n in _names(c.price_from) if values.get(n)), None)
+                if key not in self.prices:
+                    return None  # e.g. a free-text instance type without a price
+                unit = self.prices[key]
+            quantity = c.quantity * (float(values.get(c.quantity_from, 0)) if c.quantity_from else 1)
+            items.append(CostItem(label=c.label, hourly=round(unit * quantity, 6)))
+        return round(sum(i.hourly for i in items), 6), items
+
     def all(self) -> list[TemplateSpec]:
         return list(self._templates.values())
 
     def get(self, template_id: str) -> TemplateSpec | None:
         return self._templates.get(template_id)
+
+
+def _names(value: str | list[str] | None) -> list[str]:
+    if value is None:
+        return []
+    return [value] if isinstance(value, str) else value
 
 
 def _as_string(value: InputValue) -> str:

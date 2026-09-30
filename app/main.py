@@ -16,8 +16,8 @@ from .config import Settings
 from .db import Database
 from .identity import Caller, IdentityError, IdentityResolver, discover_jwks_url
 from .models import (
-    AnalyticsSummary, AnalyticsTimeseries, DestroyRequest, ExtendRequest, Lab, LabAccess, LabCreate,
-    LabEventList, LabList, LabStatus, Problem, Template, TemplateList,
+    AnalyticsSummary, AnalyticsTimeseries, CostReport, DestroyRequest, Estimate, EstimateRequest, ExtendRequest,
+    Lab, LabAccess, LabCreate, LabEventList, LabList, LabStatus, Problem, Template, TemplateList,
 )
 from .openbao import OpenBaoClient
 from .service import LabError, LabService, now
@@ -106,6 +106,11 @@ def build_app(
                 access_store=bao,
             )
         app.state.service = service
+        try:
+            if priced := await service.backfill_prices():
+                log.info("priced %d existing labs from the catalog", priced)
+        except Exception:
+            log.exception("pricing existing labs failed")
         app.state.identity = identity or identity_from_settings(service.settings)
         task = (
             asyncio.create_task(_reconcile_forever(service, service.settings.reconcile_interval_seconds))
@@ -123,7 +128,7 @@ def build_app(
 
     app = FastAPI(
         title="Terrakube Self-Service",
-        version="0.2.1",
+        version="0.3.0",
         description=(
             "Self-service environments (labs) on Terrakube. Pick a template, submit its inputs, and the service "
             "creates a Terrakube workspace, applies it, and destroys it when its TTL expires."
@@ -181,6 +186,12 @@ def build_app(
         if template is None:
             raise LabError(404, "template not found")
         return Template.model_validate(template.model_dump())
+
+    @app.post("/v1/templates/{template_id}/estimate", response_model=Estimate, dependencies=v1, tags=["templates"],
+              summary="Estimate a lab's cost before creating it", responses=errors(404, 422))
+    async def estimate_template(template_id: str, body: EstimateRequest, svc: Service) -> Estimate:
+        """Hourly and total list-price estimate for these form inputs; 404 when the template has no cost model."""
+        return svc.estimate(template_id, body)
 
     @app.post("/v1/labs", response_model=Lab, status_code=status.HTTP_202_ACCEPTED, dependencies=v1, tags=["labs"],
               summary="Create a lab from a template", responses=errors(403, 409, 422, 502))
@@ -252,6 +263,12 @@ def build_app(
         svc: Service, _: Admin, days: Annotated[int, Query(ge=1, le=365)] = 30
     ) -> AnalyticsSummary:
         return AnalyticsSummary(window_days=days, **await svc.db.summary(now() - timedelta(days=days)))
+
+    @app.get("/v1/analytics/costs", response_model=CostReport, dependencies=v1, tags=["analytics"],
+             summary="Estimated cost per owner and template (admins)", responses=errors(403, 422))
+    async def analytics_costs(svc: Service, _: Admin, days: Annotated[int, Query(ge=1, le=365)] = 30) -> CostReport:
+        """Lab-hours and estimated cost in the window, per owner (split by template) and per template."""
+        return await svc.cost_report(days)
 
     @app.get("/v1/analytics/timeseries", response_model=AnalyticsTimeseries, dependencies=v1, tags=["analytics"],
              summary="Daily created, destroyed and expired labs (admins)", responses=errors(403, 422))
