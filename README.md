@@ -36,6 +36,8 @@ Requests carry `Authorization: Bearer <api key>` (the portal) and the end user's
 
 Lab status: `pending` → `provisioning` → `ready` or `failed` → `destroying` → `destroyed` or `destroy_failed`. A `failed` lab can be retried, and still expires and is destroyed, which cleans up partial resources. A `destroy_failed` lab waits for a person to inspect the Terrakube run and retry.
 
+**In Terrakube.** Lab workspaces are named `lab-<name>`, go into the project `Self-service` (created if missing; `TERRAKUBE_PROJECT`, empty for none), and carry the tags `lab_owner:<email>` and `expires_at:<UTC time>`, so admins can filter labs by owner and expiry in the Terrakube UI. Extending a lab moves its `expires_at` tag; destroying it removes the tag. Terrakube before 2.34 has no tag values, hence `name:value` tags. Project and tag failures are logged and never fail a lab. Set `TERRAKUBE_TAGS=false` to disable tags.
+
 **Access details.** Templates publish what the owner needs (kubeconfig, passwords, URLs) to OpenBao kv-v2 at `ACCESS_SECRET_PATH` (default `secret/data/labs/{name}`) and delete it when destroyed. `GET /v1/labs/{id}/access` returns it to the owner or an admin once the lab is `ready`, with `Cache-Control: no-store`, and records an `access_viewed` event. The service's OpenBao role needs read access to that path.
 
 ## Catalog
@@ -90,7 +92,7 @@ The Terrakube token can come from:
 
 `existingSecret` (with `API_KEYS` and `DATABASE_URL`) and `existingCatalogConfigMap` replace the chart-managed Secret and ConfigMap. `route.*` publishes the API through a Gateway API `HTTPRoute`; otherwise it is cluster-internal.
 
-Environment variables (for running without the chart): `DATABASE_URL`, `API_KEYS` (comma-separated), `CATALOG_PATH`, `TERRAKUBE_API_URL`, `TERRAKUBE_UI_URL`, `TERRAKUBE_ORGANIZATION`, `TERRAKUBE_VCS_ID`, `TERRAKUBE_APPLY_TEMPLATE` (default `Plan and apply`), `TERRAKUBE_DESTROY_TEMPLATE` (default `Destroy`), one of `TERRAKUBE_TOKEN` / `TERRAKUBE_TOKEN_FILE` / `OPENBAO_ADDR` (+ `OPENBAO_ROLE`, `OPENBAO_SECRET_PATH`, `OPENBAO_SECRET_KEY`), `ACCESS_SECRET_PATH`, `ADMIN_EMAILS`, `USER_TOKEN_ISSUER` / `USER_TOKEN_AUDIENCE` / `USER_TOKEN_JWKS_URL` / `USER_TOKEN_EMAIL_CLAIM` (token mode), `RECONCILE_INTERVAL_SECONDS` (default 30), `DELETE_WORKSPACE_AFTER_DESTROY` (default true).
+Environment variables (for running without the chart): `DATABASE_URL`, `API_KEYS` (comma-separated), `CATALOG_PATH`, `TERRAKUBE_API_URL`, `TERRAKUBE_UI_URL`, `TERRAKUBE_ORGANIZATION`, `TERRAKUBE_VCS_ID`, `TERRAKUBE_APPLY_TEMPLATE` (default `Plan and apply`), `TERRAKUBE_DESTROY_TEMPLATE` (default `Destroy`), `TERRAKUBE_PROJECT` (default `Self-service`), `TERRAKUBE_TAGS` (default true), one of `TERRAKUBE_TOKEN` / `TERRAKUBE_TOKEN_FILE` / `OPENBAO_ADDR` (+ `OPENBAO_ROLE`, `OPENBAO_SECRET_PATH`, `OPENBAO_SECRET_KEY`), `ACCESS_SECRET_PATH`, `ADMIN_EMAILS`, `USER_TOKEN_ISSUER` / `USER_TOKEN_AUDIENCE` / `USER_TOKEN_JWKS_URL` / `USER_TOKEN_EMAIL_CLAIM` (token mode), `RECONCILE_INTERVAL_SECONDS` (default 30), `DELETE_WORKSPACE_AFTER_DESTROY` (default true).
 
 ## Development
 

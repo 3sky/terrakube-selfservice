@@ -95,8 +95,14 @@ class Terrakube(Protocol):
 
     async def create_workspace(
         self, *, name: str, description: str, repository: str, branch: str, folder: str,
-        iac_type: str, iac_version: str, vcs_id: str | None,
+        iac_type: str, iac_version: str, vcs_id: str | None, project_id: str | None = None,
     ) -> str: ...
+
+    async def project_id(self, name: str) -> str: ...
+
+    async def set_workspace_tags(self, workspace_id: str, tags: dict[str, str]) -> None: ...
+
+    async def release_workspace_tags(self, workspace_id: str, keys: list[str]) -> None: ...
 
     async def add_variable(
         self, workspace_id: str, *, key: str, value: str, category: str, sensitive: bool, description: str
@@ -116,6 +122,7 @@ class TerrakubeClient:
         self._http, self._api, self._ui, self._org_name, self._tokens = http, api_url, ui_url, organization, tokens
         self._org_id: str | None = None
         self._templates: dict[str, str] = {}
+        self._projects: dict[str, str] = {}
 
     async def _request(self, method: str, path: str, body: dict[str, Any] | None = None, *, retry: bool = True) -> Any:
         token = await self._tokens.get()
@@ -155,7 +162,7 @@ class TerrakubeClient:
 
     async def create_workspace(
         self, *, name: str, description: str, repository: str, branch: str, folder: str,
-        iac_type: str, iac_version: str, vcs_id: str | None,
+        iac_type: str, iac_version: str, vcs_id: str | None, project_id: str | None = None,
     ) -> str:
         org = await self.organization_id()
         body: dict[str, Any] = {
@@ -173,9 +180,87 @@ class TerrakubeClient:
                 },
             }
         }
+        relationships: dict[str, Any] = {}
         if vcs_id:
-            body["data"]["relationships"] = {"vcs": {"data": {"type": "vcs", "id": vcs_id}}}
+            relationships["vcs"] = {"data": {"type": "vcs", "id": vcs_id}}
+        if project_id:
+            relationships["project"] = {"data": {"type": "project", "id": project_id}}
+        if relationships:
+            body["data"]["relationships"] = relationships
         return (await self._request("POST", f"organization/{org}/workspace", body))["data"]["id"]
+
+    async def project_id(self, name: str) -> str:
+        """Id of the organisation's project `name`, created on first use."""
+        if name not in self._projects:
+            org = await self.organization_id()
+            projects = (await self._request("GET", f"organization/{org}/project"))["data"]
+            found = [p["id"] for p in projects if p["attributes"]["name"] == name]
+            if found:
+                self._projects[name] = found[0]
+            else:
+                body = {"data": {"type": "project", "attributes": {
+                    "name": name, "description": "Labs created by terrakube-selfservice"}}}
+                self._projects[name] = (await self._request("POST", f"organization/{org}/project", body))["data"]["id"]
+        return self._projects[name]
+
+    # Tags. Terrakube before 2.34 has no tag values, so a tag is `key:value`
+    # (e.g. lab_owner:alice@example.com), created at organisation level on first use.
+
+    async def _tags(self, org: str) -> dict[str, str]:
+        data = (await self._request("GET", f"organization/{org}/tag"))["data"]
+        return {t["attributes"]["name"]: t["id"] for t in data}
+
+    async def _workspace_tags(self, org: str, workspace_id: str) -> list[dict[str, Any]]:
+        return (await self._request("GET", f"organization/{org}/workspace/{workspace_id}/workspaceTag"))["data"]
+
+    async def set_workspace_tags(self, workspace_id: str, tags: dict[str, str]) -> None:
+        """Attach `key:value` tags, replacing the workspace's current value of each key."""
+        org = await self.organization_id()
+        existing = await self._tags(org)
+        by_id = {tag_id: name for name, tag_id in existing.items()}
+        current = await self._workspace_tags(org, workspace_id)
+        for key, value in tags.items():
+            name = f"{key}:{value}"
+            tag_id = existing.get(name)
+            if tag_id is None:
+                body = {"data": {"type": "tag", "attributes": {"name": name}}}
+                tag_id = (await self._request("POST", f"organization/{org}/tag", body))["data"]["id"]
+                existing[name], by_id[tag_id] = tag_id, name
+            same_key = [w for w in current if by_id.get(w["attributes"]["tagId"], "").startswith(f"{key}:")]
+            if same_key:
+                link = same_key[0]
+                old_tag = link["attributes"]["tagId"]
+                if old_tag != tag_id:
+                    await self._request(
+                        "PATCH", f"organization/{org}/workspace/{workspace_id}/workspaceTag/{link['id']}",
+                        {"data": {"type": "workspacetag", "id": link["id"], "attributes": {"tagId": tag_id}}},
+                    )
+                    await self._delete_tag_if_unused(org, old_tag)
+            else:
+                await self._request(
+                    "POST", f"organization/{org}/workspace/{workspace_id}/workspaceTag",
+                    {"data": {"type": "workspacetag", "attributes": {"tagId": tag_id}}},
+                )
+
+    async def release_workspace_tags(self, workspace_id: str, keys: list[str]) -> None:
+        """Detach this workspace's `key:*` tags and delete them from the organisation once unused."""
+        org = await self.organization_id()
+        names = {tag_id: name for name, tag_id in (await self._tags(org)).items()}
+        for link in await self._workspace_tags(org, workspace_id):
+            tag_id = link["attributes"]["tagId"]
+            if names.get(tag_id, "").split(":", 1)[0] in keys:
+                await self._request(
+                    "DELETE", f"organization/{org}/workspace/{workspace_id}/workspaceTag/{link['id']}",
+                    {"data": {"type": "workspacetag", "id": link["id"]}},
+                )
+                await self._delete_tag_if_unused(org, tag_id)
+
+    async def _delete_tag_if_unused(self, org: str, tag_id: str) -> None:
+        for workspace in (await self._request("GET", f"organization/{org}/workspace"))["data"]:
+            if any(link["attributes"]["tagId"] == tag_id for link in await self._workspace_tags(org, workspace["id"])):
+                return
+        # Terrakube's JSON:API DELETE needs a body.
+        await self._request("DELETE", f"organization/{org}/tag/{tag_id}", {"data": {"type": "tag", "id": tag_id}})
 
     async def add_variable(
         self, workspace_id: str, *, key: str, value: str, category: str, sensitive: bool, description: str

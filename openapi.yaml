@@ -4,7 +4,7 @@ info:
   description: Self-service environments (labs) on Terrakube. Pick a template, submit
     its inputs, and the service creates a Terrakube workspace, applies it, and destroys
     it when its TTL expires.
-  version: 0.3.0
+  version: 0.4.0
 paths:
   /v1/templates:
     get:
@@ -961,6 +961,11 @@ components:
         active_labs:
           type: integer
           title: Active Labs
+          description: Labs pending, provisioning, ready or failed (not yet destroyed).
+        needs_attention:
+          type: integer
+          title: Needs Attention
+          description: 'Labs in destroy_failed: cleanup needs a person.'
         by_status:
           additionalProperties:
             type: integer
@@ -992,6 +997,7 @@ components:
       required:
       - window_days
       - active_labs
+      - needs_attention
       - by_status
       - created
       - destroyed
@@ -1615,6 +1621,10 @@ components:
         active:
           type: integer
           title: Active
+        needs_attention:
+          type: integer
+          title: Needs Attention
+          description: Labs whose destroy failed; their resources may still exist.
         destroyed:
           type: integer
           title: Destroyed
@@ -1639,6 +1649,7 @@ components:
       - template_id
       - created
       - active
+      - needs_attention
       - destroyed
       - expired
       - failed

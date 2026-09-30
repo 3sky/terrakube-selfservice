@@ -198,7 +198,8 @@ class Database:
             """
             SELECT l.template_id,
               count(*) FILTER (WHERE l.created_at >= %(since)s)                       AS created,
-              count(*) FILTER (WHERE l.status <> 'destroyed')                        AS active,
+              count(*) FILTER (WHERE l.status NOT IN ('destroyed', 'destroy_failed')) AS active,
+              count(*) FILTER (WHERE l.status = 'destroy_failed')                    AS needs_attention,
               count(*) FILTER (WHERE l.destroyed_at >= %(since)s)                    AS destroyed,
               count(*) FILTER (WHERE l.destroy_reason = 'expired' AND l.destroy_requested_at >= %(since)s) AS expired,
               count(*) FILTER (WHERE EXISTS (
@@ -219,7 +220,7 @@ class Database:
             """
             SELECT owner_email,
               count(*) FILTER (WHERE created_at >= %(since)s) AS created,
-              count(*) FILTER (WHERE status <> 'destroyed')  AS active
+              count(*) FILTER (WHERE status NOT IN ('destroyed', 'destroy_failed')) AS active
             FROM labs
             WHERE created_at >= %(since)s OR status <> 'destroyed'
             GROUP BY owner_email
@@ -228,8 +229,13 @@ class Database:
             """,
             params,
         )
-        active = sum(n for s, n in by_status.items() if s != "destroyed")
-        return {"active_labs": active, "by_status": by_status, **counts, "templates": templates, "top_owners": owners}
+        # Active: holds (or is creating) resources on purpose. destroy_failed labs
+        # are counted separately: their cleanup needs a person.
+        active = sum(n for s, n in by_status.items() if s not in ("destroyed", "destroy_failed"))
+        return {
+            "active_labs": active, "needs_attention": by_status.get("destroy_failed", 0), "by_status": by_status,
+            **counts, "templates": templates, "top_owners": owners,
+        }
 
     async def timeseries(self, since: datetime) -> list[dict[str, Any]]:
         return await self._all(

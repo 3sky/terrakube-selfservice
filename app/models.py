@@ -263,6 +263,7 @@ class TemplateStats(BaseModel):
     template_id: str
     created: int
     active: int
+    needs_attention: int = Field(description="Labs whose destroy failed; their resources may still exist.")
     destroyed: int
     expired: int
     failed: int
@@ -278,7 +279,8 @@ class OwnerStats(BaseModel):
 
 class AnalyticsSummary(BaseModel):
     window_days: int
-    active_labs: int
+    active_labs: int = Field(description="Labs pending, provisioning, ready or failed (not yet destroyed).")
+    needs_attention: int = Field(description="Labs in destroy_failed: cleanup needs a person.")
     by_status: dict[str, int]
     created: int
     destroyed: int

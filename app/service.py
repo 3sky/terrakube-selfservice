@@ -43,6 +43,11 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
+def tag_time(moment: datetime) -> str:
+    """Compact UTC minute for tags, e.g. 2026-09-30T12:00Z."""
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ")
+
+
 class LabService:
     def __init__(
         self, settings: Settings, catalog: Catalog, db: Database, terrakube: Terrakube,
@@ -167,6 +172,7 @@ class LabService:
         )
 
         workspace_id: str | None = None
+        project_id = await self._project_id()
         try:
             workspace_id = await self.terrakube.create_workspace(
                 name=f"lab-{name}",
@@ -177,6 +183,7 @@ class LabService:
                 iac_type=template.source.iac_type,
                 iac_version=template.source.iac_version,
                 vcs_id=self.settings.terrakube_vcs_id if template.source.use_vcs_connection else None,
+                project_id=project_id,
             )
             await self.db.update_lab(
                 lab_id, workspace_id=workspace_id,
@@ -198,6 +205,8 @@ class LabService:
                 await self.terrakube.add_variable(
                     workspace_id, key=key, value=value, category="ENV", sensitive=False, description="lab metadata",
                 )
+            await self._tag(workspace_id, {"lab_owner": request.owner_email,
+                                           "expires_at": tag_time(created + timedelta(hours=ttl))})
             job_id = await self.terrakube.start_job(workspace_id, self.settings.terrakube_apply_template)
         except Exception as error:
             log.exception("provisioning lab %s failed", lab_id)
@@ -233,6 +242,25 @@ class LabService:
             raise LabError(409, f"a lab named {request.name!r} already exists")
         raise LabError(409, "could not generate a free lab name; retry or pass one")
 
+    async def _project_id(self) -> str | None:
+        if not self.settings.terrakube_project:
+            return None
+        try:
+            return await self.terrakube.project_id(self.settings.terrakube_project)
+        except Exception:
+            log.warning("project %r unavailable; creating the workspace without it",
+                        self.settings.terrakube_project, exc_info=True)
+            return None
+
+    async def _tag(self, workspace_id: str, tags: dict[str, str]) -> None:
+        """Best effort: tags help admins in the Terrakube UI but never fail a lab."""
+        if not self.settings.terrakube_tags:
+            return
+        try:
+            await self.terrakube.set_workspace_tags(workspace_id, tags)
+        except Exception:
+            log.warning("tagging workspace %s failed", workspace_id, exc_info=True)
+
     # --- lifecycle ---------------------------------------------------------
 
     async def extend(self, lab_id: UUID, hours: int, caller: Caller) -> dict[str, Any]:
@@ -252,6 +280,8 @@ class LabService:
         )
         if updated is None:
             raise LabError(409, "lab changed while extending; retry")
+        if row["workspace_id"]:
+            await self._tag(row["workspace_id"], {"expires_at": tag_time(target)})
         return updated
 
     async def destroy(self, lab_id: UUID, caller: Caller, reason: str) -> dict[str, Any]:
@@ -382,6 +412,11 @@ class LabService:
         guard = {"expect_status": {LabStatus.destroying}, "expect_job": row["job_id"]}
         if status in JOB_SUCCEEDED:
             detail = None
+            if self.settings.terrakube_tags:
+                try:
+                    await self.terrakube.release_workspace_tags(row["workspace_id"], ["expires_at"])
+                except Exception:
+                    log.warning("releasing tags of lab %s failed", row["id"], exc_info=True)
             if self.settings.delete_workspace_after_destroy:
                 try:
                     await self.terrakube.delete_workspace(row["workspace_id"])

@@ -38,6 +38,11 @@ terrakube:
   vcsId: ""
   applyTemplate: Plan and apply
   destroyTemplate: Destroy
+  # Project for lab workspaces, created if missing; "" = no project.
+  project: Self-service
+  # Tag workspaces with lab_owner:<email> and expires_at:<UTC time> (moved on
+  # extend, removed after destroy) so admins can filter labs in the Terrakube UI.
+  tags: true
 
 # --- OpenBao / Vault ------------------------------------------------------
 # Kubernetes auth with serviceAccount.name. Used for the access endpoint and,

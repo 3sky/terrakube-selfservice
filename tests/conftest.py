@@ -36,6 +36,10 @@ class FakeTerrakube:
         self.jobs: dict[str, dict] = {}
         self.deleted: list[str] = []
         self.fail_create = False
+        self.fail_tags = False
+        self.projects: dict[str, str] = {}
+        self.tags: dict[str, dict[str, str]] = {}
+        self.released: list[tuple[str, list[str]]] = []
         self.deleted_outside: set[str] = set()
 
     async def create_workspace(self, **kwargs) -> str:
@@ -58,6 +62,17 @@ class FakeTerrakube:
 
     async def job_status(self, job_id) -> str:
         return self.jobs[job_id]["status"]
+
+    async def project_id(self, name) -> str:
+        return self.projects.setdefault(name, f"prj-{len(self.projects) + 1}")
+
+    async def set_workspace_tags(self, workspace_id, tags) -> None:
+        if self.fail_tags:
+            raise RuntimeError("tag api down")
+        self.tags.setdefault(workspace_id, {}).update(tags)
+
+    async def release_workspace_tags(self, workspace_id, keys) -> None:
+        self.released.append((workspace_id, keys))
 
     async def delete_workspace(self, workspace_id) -> None:
         self.deleted.append(workspace_id)

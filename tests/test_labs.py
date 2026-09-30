@@ -178,7 +178,7 @@ async def test_analytics(env):
     assert summary["created"] == 2
     assert summary["destroyed"] == 1
     assert summary["provision_failures"] == 1
-    assert summary["active_labs"] == 1
+    assert summary["active_labs"] == 1 and summary["needs_attention"] == 0
     assert summary["by_status"] == {"failed": 1, "destroyed": 1}
     template = summary["templates"][0]
     assert template["template_id"] == "aws-lab" and template["created"] == 2 and template["failed"] == 1
@@ -383,3 +383,45 @@ def test_catalog_rejects_bad_cost_models(tmp_path):
         path = tmp_path / "c.yaml"
         path.write_text(base + f"    cost: {cost}\n")
         assert (main(["check", str(path)]) == 0) is ok, cost
+
+
+async def test_destroy_failed_is_not_active(env):
+    client, service, terrakube = env
+    lab = (await client.post("/v1/labs", json=NEW_LAB)).json()
+    terrakube.jobs["job-1"]["status"] = "completed"
+    await service.reconcile()
+    await client.post(f"/v1/labs/{lab['id']}/destroy")
+    terrakube.jobs["job-2"]["status"] = "failed"
+    await service.reconcile()
+
+    summary = (await client.get("/v1/analytics/summary", headers=ADMIN)).json()
+    assert summary["active_labs"] == 0 and summary["needs_attention"] == 1
+    assert summary["by_status"] == {"destroy_failed": 1}
+    assert summary["templates"][0]["active"] == 0 and summary["templates"][0]["needs_attention"] == 1
+    assert summary["top_owners"][0]["active"] == 0
+
+
+async def test_workspace_project_and_tags(env):
+    client, service, terrakube = env
+    lab = (await client.post("/v1/labs", json=NEW_LAB)).json()
+    ws = terrakube.workspaces["ws-1"]
+    assert ws["project_id"] == terrakube.projects["Self-service"]
+    expires = lab["expires_at"][:16].replace("+00:00", "")
+    assert terrakube.tags["ws-1"] == {"lab_owner": "alice@example.com", "expires_at": f"{expires}Z"}
+
+    extended = (await client.post(f"/v1/labs/{lab['id']}/extend", json={"hours": 5})).json()
+    assert terrakube.tags["ws-1"]["expires_at"] == f"{extended['expires_at'][:16]}Z"
+
+    terrakube.jobs["job-1"]["status"] = "completed"
+    await service.reconcile()
+    await client.post(f"/v1/labs/{lab['id']}/destroy")
+    terrakube.jobs["job-2"]["status"] = "completed"
+    await service.reconcile()
+    assert terrakube.released == [("ws-1", ["expires_at"])]
+
+
+async def test_tag_failure_does_not_fail_the_lab(env):
+    client, _, terrakube = env
+    terrakube.fail_tags = True
+    response = await client.post("/v1/labs", json=NEW_LAB)
+    assert response.status_code == 202 and response.json()["status"] == "provisioning"

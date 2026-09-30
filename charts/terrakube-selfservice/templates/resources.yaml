@@ -90,6 +90,10 @@ spec:
               value: {{ .Values.terrakube.applyTemplate | quote }}
             - name: TERRAKUBE_DESTROY_TEMPLATE
               value: {{ .Values.terrakube.destroyTemplate | quote }}
+            - name: TERRAKUBE_PROJECT
+              value: {{ .Values.terrakube.project | quote }}
+            - name: TERRAKUBE_TAGS
+              value: {{ .Values.terrakube.tags | quote }}
             {{- if .Values.token.existingSecret.name }}
             - name: TERRAKUBE_TOKEN_FILE
               value: /var/run/terrakube-selfservice/token

@@ -44,6 +44,11 @@ class Settings:
     user_token_jwks_url: str | None = None
     user_token_email_claim: str = "email"
 
+    # Terrakube organisation of lab workspaces: project (created if missing;
+    # empty = none) and `name:value` tags (lab_owner, expires_at).
+    terrakube_project: str = "Self-service"
+    terrakube_tags: bool = True
+
     # Where a lab template publishes its access details in OpenBao (kv-v2);
     # {name} is the lab name. Needs OPENBAO_ADDR.
     access_secret_path: str = "secret/data/labs/{name}"
@@ -82,4 +87,6 @@ class Settings:
             user_token_jwks_url=os.environ.get("USER_TOKEN_JWKS_URL") or None,
             user_token_email_claim=os.environ.get("USER_TOKEN_EMAIL_CLAIM", "email"),
             access_secret_path=os.environ.get("ACCESS_SECRET_PATH", "secret/data/labs/{name}"),
+            terrakube_project=os.environ.get("TERRAKUBE_PROJECT", "Self-service"),
+            terrakube_tags=_bool(os.environ.get("TERRAKUBE_TAGS"), True),
         )
