@@ -69,7 +69,10 @@ The chart refuses to install when the catalog is invalid, no Terrakube token sou
 | `serviceAccount.name` | `terrakube-selfservice` | Service account bound in OpenBao/Vault |
 | `reconcileIntervalSeconds` | `30` | How often labs are checked and expired |
 | `deleteWorkspaceAfterDestroy` | `true` | Remove the workspace after a successful destroy |
-| `route.*` | disabled | Publish through a Gateway API `HTTPRoute` (prefix stripped); otherwise cluster-internal |
+| `ui.enabled`, `ui.publicUrl`, `ui.title` | `false` | The [web portal](#web-portal) and the address users open |
+| `ui.oidc.issuer`, `clientId`, `clientSecret`, `scopes` | | Portal sign-in |
+| `ui.sessionSecret`, `ui.sessionMaxAgeHours` | , `8` | Session cookie signing key (32+ characters) and lifetime |
+| `route.*` | disabled | Publish through a Gateway API `HTTPRoute`: `pathPrefix` is rewritten to `rewritePrefix` (`/` for the API, `/ui` for the portal only); otherwise cluster-internal |
 
 ## The Terrakube token
 
@@ -112,6 +115,31 @@ Templates publish access details with their own credentials, typically the Terra
 path "secret/data/labs/*"     { capabilities = ["create", "update", "read"] }
 path "secret/metadata/labs/*" { capabilities = ["read", "list", "delete"] }
 ```
+
+## Web portal
+
+The built-in portal is off by default. To enable it, register an OIDC client (for example a Dex static client) with the redirect URI `<publicUrl>/auth/callback`, then:
+
+```yaml
+ui:
+  enabled: true
+  publicUrl: https://lab.example.com/portal
+  oidc:
+    issuer: https://lab.example.com/dex
+    clientId: selfservice-portal
+    clientSecret: "<client secret>"
+  sessionSecret: "<at least 32 random characters>"
+route:
+  enabled: true
+  hostnames: [lab.example.com]
+  pathPrefix: /portal
+  rewritePrefix: /ui          # publishes only the portal; /v1 stays cluster-internal
+  parentRefs: [{name: public, namespace: gateway}]
+```
+
+- Users sign in with the provider; the portal needs their `email` claim. Admins are `users.adminEmails`, as for the API.
+- Sessions are signed cookies (`SameSite=Lax`, `Secure`, scoped to the portal path) that expire after `ui.sessionMaxAgeHours`. The portal's API calls also need an `X-Requested-With` header, so other sites cannot act with a user's session.
+- The portal uses no API key: it calls the service in-process. `/v1` keeps working unchanged for other tools.
 
 ## What it does in Terrakube
 
@@ -162,3 +190,7 @@ For running the image without the chart:
 | `RECONCILE_INTERVAL_SECONDS` | `30` | Loop interval |
 | `PENDING_TIMEOUT_MINUTES` | `10` | When a stuck `pending` lab is marked failed |
 | `DELETE_WORKSPACE_AFTER_DESTROY` | `true` | Remove workspaces after destroy |
+| `UI_ENABLED`, `UI_PUBLIC_URL`, `UI_TITLE` | `false`, `http://localhost:8080/ui`, `Lab self-service` | Web portal |
+| `UI_OIDC_ISSUER`, `UI_OIDC_CLIENT_ID`, `UI_OIDC_CLIENT_SECRET`, `UI_OIDC_SCOPES` | , , , `openid email profile` | Portal sign-in |
+| `UI_SESSION_SECRET`, `UI_SESSION_MAX_AGE_HOURS`, `UI_SESSION_HTTPS_ONLY` | , `8`, `true` with OIDC | Session cookie |
+| `UI_DEV_USER_EMAIL` | | Development only: no sign-in, everyone acts as this user (ignored when an issuer is set) |

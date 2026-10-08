@@ -1,6 +1,6 @@
 # Portal integration
 
-What a portal (for example an internal PS tool) needs to do to offer labs to its users. The API contract is [`openapi.yaml`](../openapi.yaml), also served at `/openapi.json` with interactive docs at `/docs`. This guide covers what the contract cannot: the security rules, which calls sit behind which screen, and how to show results. The [checklist](#6-checklist) at the end is the short version.
+What another portal or tool needs to do to offer labs to its users through the `/v1` API. If the [built-in portal](../README.md#the-portal) is enough, none of this is needed: link users to it instead. The API contract is [`openapi.yaml`](../openapi.yaml), also served at `/openapi.json` with interactive docs at `/docs`. This guide covers what the contract cannot: the security rules, which calls sit behind which screen, and how to show results. The [checklist](#6-checklist) at the end is the short version.
 
 ## 1. Call the service from the portal backend only
 

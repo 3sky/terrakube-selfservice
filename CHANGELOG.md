@@ -2,6 +2,13 @@
 
 Image `ghcr.io/3sky/terrakube-selfservice` and chart `oci://ghcr.io/3sky/charts/terrakube-selfservice` share these versions.
 
+## 0.5.0
+
+- Built-in web portal at `/ui` (chart `ui.*`, off by default): OIDC sign-in, catalog with forms and live cost estimates, labs with status, expiry and cost, access details with kubeconfig download, extend, retry, destroy, history, and admin usage and cost views. Plain HTML and JavaScript in `app/ui_static/`.
+- `/ui/api/*` serves the same templates, labs and analytics endpoints as `/v1`, with the user from the session; `/v1` is unchanged.
+- Chart: `route.rewritePrefix` to publish only the portal (`/portal` → `/ui`).
+- Cost estimates no longer fail while required form fields are still empty; invalid values are still rejected.
+
 ## 0.4.0
 
 - Lab workspaces go into a Terrakube project, `Self-service` by default (`terrakube.project`), created if missing.

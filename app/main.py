@@ -7,7 +7,7 @@ from typing import Annotated
 from uuid import UUID
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -22,6 +22,7 @@ from .models import (
 from .openbao import OpenBaoClient
 from .service import LabError, LabService, now
 from .terrakube import FileToken, OpenBaoToken, StaticToken, TerrakubeClient, TokenSource
+from .ui import UISettings, mount_ui
 
 log = logging.getLogger("terrakube_selfservice")
 
@@ -108,9 +109,10 @@ def identity_from_settings(cfg: Settings) -> IdentityResolver:
 
 def build_app(
     settings: Settings | None = None, service: LabService | None = None, run_reconciler: bool = True,
-    identity: IdentityResolver | None = None,
+    identity: IdentityResolver | None = None, ui: UISettings | None = None, ui_from_env: bool = False,
 ) -> FastAPI:
     """Build the app. Tests pass a ready service; production builds it from the environment."""
+    ui_settings = ui or (UISettings.from_env() if ui_from_env else None)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -157,7 +159,7 @@ def build_app(
 
     app = FastAPI(
         title="Terrakube Self-Service",
-        version="0.4.0",
+        version="0.5.0",
         description=API_DESCRIPTION,
         openapi_tags=OPENAPI_TAGS,
         lifespan=lifespan,
@@ -188,8 +190,6 @@ def build_app(
         return caller
 
     Service = Annotated[LabService, Depends(current_service)]
-    User = Annotated[Caller, Depends(current_caller)]
-    Admin = Annotated[Caller, Depends(admin_caller)]
 
     @app.exception_handler(LabError)
     async def lab_error(_: Request, error: LabError) -> JSONResponse:
@@ -199,114 +199,124 @@ def build_app(
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
-    v1 = [Depends(authenticated)]
+    def add_routes(router: APIRouter, user_dep, admin_dep, deps: list) -> None:
+        """Templates, labs and analytics, for one way of identifying the caller (API or UI)."""
+        User = Annotated[Caller, Depends(user_dep)]  # noqa: N806
+        Admin = Annotated[Caller, Depends(admin_dep)]  # noqa: N806
 
-    @app.get("/v1/templates", response_model=TemplateList, dependencies=v1, tags=["templates"],
-             summary="List lab templates", responses=errors())
-    async def list_templates(svc: Service) -> TemplateList:
-        return TemplateList(items=[Template.model_validate(t.model_dump()) for t in svc.catalog.all()])
+        @router.get("/templates", response_model=TemplateList, dependencies=deps, tags=["templates"],
+                 summary="List lab templates", responses=errors())
+        async def list_templates(svc: Service) -> TemplateList:
+            return TemplateList(items=[Template.model_validate(t.model_dump()) for t in svc.catalog.all()])
 
-    @app.get("/v1/templates/{template_id}", response_model=Template, dependencies=v1, tags=["templates"],
-             summary="Get a template and its form inputs", responses=errors(404))
-    async def get_template(template_id: str, svc: Service) -> Template:
-        template = svc.catalog.get(template_id)
-        if template is None:
-            raise LabError(404, "template not found")
-        return Template.model_validate(template.model_dump())
+        @router.get("/templates/{template_id}", response_model=Template, dependencies=deps, tags=["templates"],
+                 summary="Get a template and its form inputs", responses=errors(404))
+        async def get_template(template_id: str, svc: Service) -> Template:
+            template = svc.catalog.get(template_id)
+            if template is None:
+                raise LabError(404, "template not found")
+            return Template.model_validate(template.model_dump())
 
-    @app.post("/v1/templates/{template_id}/estimate", response_model=Estimate, dependencies=v1, tags=["templates"],
-              summary="Estimate a lab's cost before creating it", responses=errors(404, 422))
-    async def estimate_template(template_id: str, body: EstimateRequest, svc: Service) -> Estimate:
-        """Hourly and total list-price estimate for these form inputs; 404 when the template has no cost model."""
-        return svc.estimate(template_id, body)
+        @router.post("/templates/{template_id}/estimate", response_model=Estimate, dependencies=deps, tags=["templates"],
+                  summary="Estimate a lab's cost before creating it", responses=errors(404, 422))
+        async def estimate_template(template_id: str, body: EstimateRequest, svc: Service) -> Estimate:
+            """Hourly and total list-price estimate for these form inputs; 404 when the template has no cost model."""
+            return svc.estimate(template_id, body)
 
-    @app.post("/v1/labs", response_model=Lab, status_code=status.HTTP_202_ACCEPTED, dependencies=v1, tags=["labs"],
-              summary="Create a lab from a template", responses=errors(403, 409, 422, 502))
-    async def create_lab(body: LabCreate, svc: Service, caller: User) -> Lab:
-        """Creates the Terrakube workspace and queues its apply. Poll the lab until `ready` or `failed`."""
-        return svc.to_model(await svc.create(body, caller))
+        @router.post("/labs", response_model=Lab, status_code=status.HTTP_202_ACCEPTED, dependencies=deps, tags=["labs"],
+                  summary="Create a lab from a template", responses=errors(403, 409, 422, 502))
+        async def create_lab(body: LabCreate, svc: Service, caller: User) -> Lab:
+            """Creates the Terrakube workspace and queues its apply. Poll the lab until `ready` or `failed`."""
+            return svc.to_model(await svc.create(body, caller))
 
-    @app.get("/v1/labs", response_model=LabList, dependencies=v1, tags=["labs"], summary="List labs",
-             responses=errors(422))
-    async def list_labs(
-        svc: Service,
-        caller: User,
-        owner_email: Annotated[str | None, Query(description="Admins only; other users always see their own labs.")] = None,
-        lab_status: Annotated[LabStatus | None, Query(alias="status")] = None,
-        template_id: str | None = None,
-        include_destroyed: bool = False,
-        limit: Annotated[int, Query(ge=1, le=500)] = 100,
-    ) -> LabList:
-        owner = (owner_email.lower() if owner_email else None) if caller.admin else caller.email
-        rows = await svc.db.list_labs(
-            owner=owner, status=lab_status, template_id=template_id,
-            include_destroyed=include_destroyed or lab_status == LabStatus.destroyed, limit=limit,
-        )
-        return LabList(items=[svc.to_model(r) for r in rows])
+        @router.get("/labs", response_model=LabList, dependencies=deps, tags=["labs"], summary="List labs",
+                 responses=errors(422))
+        async def list_labs(
+            svc: Service,
+            caller: User,
+            owner_email: Annotated[str | None, Query(description="Admins only; other users always see their own labs.")] = None,
+            lab_status: Annotated[LabStatus | None, Query(alias="status")] = None,
+            template_id: str | None = None,
+            include_destroyed: bool = False,
+            limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        ) -> LabList:
+            owner = (owner_email.lower() if owner_email else None) if caller.admin else caller.email
+            rows = await svc.db.list_labs(
+                owner=owner, status=lab_status, template_id=template_id,
+                include_destroyed=include_destroyed or lab_status == LabStatus.destroyed, limit=limit,
+            )
+            return LabList(items=[svc.to_model(r) for r in rows])
 
-    @app.get("/v1/labs/{lab_id}", response_model=Lab, dependencies=v1, tags=["labs"], summary="Get a lab",
-             responses=errors(404))
-    async def get_lab(lab_id: UUID, svc: Service, caller: User) -> Lab:
-        return svc.to_model(await svc.get_owned(lab_id, caller))
+        @router.get("/labs/{lab_id}", response_model=Lab, dependencies=deps, tags=["labs"], summary="Get a lab",
+                 responses=errors(404))
+        async def get_lab(lab_id: UUID, svc: Service, caller: User) -> Lab:
+            return svc.to_model(await svc.get_owned(lab_id, caller))
 
-    @app.get("/v1/labs/{lab_id}/access", response_model=LabAccess, dependencies=v1, tags=["labs"],
-             summary="Access details of a ready lab", responses=errors(404, 409, 501, 502))
-    async def lab_access(lab_id: UUID, svc: Service, caller: User, response: Response) -> LabAccess:
-        """Kubeconfig, passwords, URLs published by the template. Owner or admin only; every read is audited.
+        @router.get("/labs/{lab_id}/access", response_model=LabAccess, dependencies=deps, tags=["labs"],
+                 summary="Access details of a ready lab", responses=errors(404, 409, 501, 502))
+        async def lab_access(lab_id: UUID, svc: Service, caller: User, response: Response) -> LabAccess:
+            """Kubeconfig, passwords, URLs published by the template. Owner or admin only; every read is audited.
 
-        The response is marked `Cache-Control: no-store`: show it to the user, never cache, log or store it.
-        """
-        row, values = await svc.access(lab_id, caller)
-        response.headers["Cache-Control"] = "no-store"
-        return LabAccess(lab_id=row["id"], name=row["name"], values=values)
+            The response is marked `Cache-Control: no-store`: show it to the user, never cache, log or store it.
+            """
+            row, values = await svc.access(lab_id, caller)
+            response.headers["Cache-Control"] = "no-store"
+            return LabAccess(lab_id=row["id"], name=row["name"], values=values)
 
-    @app.post("/v1/labs/{lab_id}/extend", response_model=Lab, dependencies=v1, tags=["labs"],
-              summary="Extend a lab's TTL", responses=errors(404, 409, 422))
-    async def extend_lab(lab_id: UUID, body: ExtendRequest, svc: Service, caller: User) -> Lab:
-        return svc.to_model(await svc.extend(lab_id, body.hours, caller))
+        @router.post("/labs/{lab_id}/extend", response_model=Lab, dependencies=deps, tags=["labs"],
+                  summary="Extend a lab's TTL", responses=errors(404, 409, 422))
+        async def extend_lab(lab_id: UUID, body: ExtendRequest, svc: Service, caller: User) -> Lab:
+            return svc.to_model(await svc.extend(lab_id, body.hours, caller))
 
-    @app.post("/v1/labs/{lab_id}/retry", response_model=Lab, status_code=status.HTTP_202_ACCEPTED,
-              dependencies=v1, tags=["labs"], summary="Retry a failed lab", responses=errors(404, 409, 502))
-    async def retry_lab(lab_id: UUID, svc: Service, caller: User) -> Lab:
-        """Runs the apply again in the lab's existing workspace; the lab goes back to `provisioning`."""
-        return svc.to_model(await svc.retry(lab_id, caller))
+        @router.post("/labs/{lab_id}/retry", response_model=Lab, status_code=status.HTTP_202_ACCEPTED,
+                  dependencies=deps, tags=["labs"], summary="Retry a failed lab", responses=errors(404, 409, 502))
+        async def retry_lab(lab_id: UUID, svc: Service, caller: User) -> Lab:
+            """Runs the apply again in the lab's existing workspace; the lab goes back to `provisioning`."""
+            return svc.to_model(await svc.retry(lab_id, caller))
 
-    @app.post("/v1/labs/{lab_id}/destroy", response_model=Lab, status_code=status.HTTP_202_ACCEPTED,
-              dependencies=v1, tags=["labs"], summary="Destroy a lab now", responses=errors(404, 409, 502))
-    async def destroy_lab(lab_id: UUID, svc: Service, caller: User, body: DestroyRequest | None = None) -> Lab:
-        """Queues a destroy job; the workspace is deleted once it completes. Also retries a `destroy_failed` lab."""
-        reason = (body.reason if body and body.reason else None) or "requested"
-        return svc.to_model(await svc.destroy(lab_id, caller, reason))
+        @router.post("/labs/{lab_id}/destroy", response_model=Lab, status_code=status.HTTP_202_ACCEPTED,
+                  dependencies=deps, tags=["labs"], summary="Destroy a lab now", responses=errors(404, 409, 502))
+        async def destroy_lab(lab_id: UUID, svc: Service, caller: User, body: DestroyRequest | None = None) -> Lab:
+            """Queues a destroy job; the workspace is deleted once it completes. Also retries a `destroy_failed` lab."""
+            reason = (body.reason if body and body.reason else None) or "requested"
+            return svc.to_model(await svc.destroy(lab_id, caller, reason))
 
-    @app.get("/v1/labs/{lab_id}/events", response_model=LabEventList, dependencies=v1, tags=["labs"],
-             summary="Audit trail of a lab", responses=errors(404))
-    async def lab_events(lab_id: UUID, svc: Service, caller: User) -> LabEventList:
-        await svc.get_owned(lab_id, caller)
-        return LabEventList(items=await svc.db.events(lab_id))
+        @router.get("/labs/{lab_id}/events", response_model=LabEventList, dependencies=deps, tags=["labs"],
+                 summary="Audit trail of a lab", responses=errors(404))
+        async def lab_events(lab_id: UUID, svc: Service, caller: User) -> LabEventList:
+            await svc.get_owned(lab_id, caller)
+            return LabEventList(items=await svc.db.events(lab_id))
 
-    @app.get("/v1/analytics/summary", response_model=AnalyticsSummary, dependencies=v1, tags=["analytics"],
-             summary="Usage summary (admins)", responses=errors(403, 422))
-    async def analytics_summary(
-        svc: Service, _: Admin, days: Annotated[int, Query(ge=1, le=365)] = 30
-    ) -> AnalyticsSummary:
-        return AnalyticsSummary(window_days=days, **await svc.db.summary(now() - timedelta(days=days)))
+        @router.get("/analytics/summary", response_model=AnalyticsSummary, dependencies=deps, tags=["analytics"],
+                 summary="Usage summary (admins)", responses=errors(403, 422))
+        async def analytics_summary(
+            svc: Service, _: Admin, days: Annotated[int, Query(ge=1, le=365)] = 30
+        ) -> AnalyticsSummary:
+            return AnalyticsSummary(window_days=days, **await svc.db.summary(now() - timedelta(days=days)))
 
-    @app.get("/v1/analytics/costs", response_model=CostReport, dependencies=v1, tags=["analytics"],
-             summary="Estimated cost per owner and template (admins)", responses=errors(403, 422))
-    async def analytics_costs(svc: Service, _: Admin, days: Annotated[int, Query(ge=1, le=365)] = 30) -> CostReport:
-        """Lab-hours and estimated cost in the window, per owner (split by template) and per template."""
-        return await svc.cost_report(days)
+        @router.get("/analytics/costs", response_model=CostReport, dependencies=deps, tags=["analytics"],
+                 summary="Estimated cost per owner and template (admins)", responses=errors(403, 422))
+        async def analytics_costs(svc: Service, _: Admin, days: Annotated[int, Query(ge=1, le=365)] = 30) -> CostReport:
+            """Lab-hours and estimated cost in the window, per owner (split by template) and per template."""
+            return await svc.cost_report(days)
 
-    @app.get("/v1/analytics/timeseries", response_model=AnalyticsTimeseries, dependencies=v1, tags=["analytics"],
-             summary="Daily created, destroyed and expired labs (admins)", responses=errors(403, 422))
-    async def analytics_timeseries(
-        svc: Service, _: Admin, days: Annotated[int, Query(ge=1, le=365)] = 30
-    ) -> AnalyticsTimeseries:
-        return AnalyticsTimeseries(window_days=days, points=await svc.db.timeseries(now() - timedelta(days=days)))
+        @router.get("/analytics/timeseries", response_model=AnalyticsTimeseries, dependencies=deps, tags=["analytics"],
+                 summary="Daily created, destroyed and expired labs (admins)", responses=errors(403, 422))
+        async def analytics_timeseries(
+            svc: Service, _: Admin, days: Annotated[int, Query(ge=1, le=365)] = 30
+        ) -> AnalyticsTimeseries:
+            return AnalyticsTimeseries(window_days=days, points=await svc.db.timeseries(now() - timedelta(days=days)))
+
+    api = APIRouter(prefix="/v1")
+    add_routes(api, current_caller, admin_caller, [Depends(authenticated)])
+    app.include_router(api)
+
+    if ui_settings is not None:
+        mount_ui(app, ui_settings, add_routes)
 
     return app
 
 
 def create_app() -> FastAPI:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    return build_app()
+    return build_app(ui_from_env=True)

@@ -1,6 +1,6 @@
 # Terrakube Self-Service
 
-Self-service environments on top of [Terrakube](https://terrakube.io). A portal (an internal tool, Backstage, a web form) shows a catalog of templates; a user fills in a form and gets a **lab**: a Terraform/OpenTofu workspace that is applied for them, handed over with its access details, and destroyed automatically when its time runs out.
+Self-service environments on top of [Terrakube](https://terrakube.io). Users open the built-in web portal (or any portal that calls the API), pick a template, fill in a form and get a **lab**: a Terraform/OpenTofu workspace that is applied for them, handed over with its access details, and destroyed automatically when its time runs out.
 
 ```mermaid
 flowchart LR
@@ -17,6 +17,7 @@ flowchart LR
 
 | Feature | What users and admins get |
 |---|---|
+| **Web portal** | Built in and optional: sign in (OIDC, for example Dex), pick a template, see the cost while filling in the form, follow your labs, download access details, extend, retry or destroy; admins get usage and cost views. Plain HTML and JavaScript, no build step. |
 | **Catalog with forms** | Templates are Git folders with a Terraform/OpenTofu module. Each declares typed form inputs (text, number, yes/no, choice; required, defaults, patterns, ranges). Portals build their forms from the API, so a new template needs no portal release. |
 | **Lifetimes (TTL)** | Every lab has an expiry: a default and a maximum per template. Owners can extend up to the maximum. Expired labs are destroyed and their workspace removed, without anyone remembering to. |
 | **Access handover** | Templates publish what the owner needs (kubeconfig, passwords, URLs) to OpenBao or Vault. The API returns it only to the owner or an admin, never cached, and records every read. |
@@ -45,7 +46,19 @@ stateDiagram-v2
 
 A background loop checks Terrakube every 30 seconds, moves labs along, and destroys expired ones. `destroy_failed` is the only state that needs a person: look at the Terrakube run, fix the cause, and destroy again.
 
-## Quickstart: a lab in five calls
+## The portal
+
+Enable it with the chart's `ui.*` values ([deployment](docs/deployment.md#web-portal)). It is served at `/ui`, typically published as `https://<host>/portal`, and uses the same rules as the API: users see only their own labs, admins see everything. Its pages live in [`app/ui_static/`](app/ui_static) (one HTML file, one JavaScript file, one stylesheet) and call `/ui/api/*`, the same endpoints as `/v1` with the user taken from the session.
+
+For local development, run without sign-in as a fixed user:
+
+```bash
+UI_ENABLED=true UI_DEV_USER_EMAIL=you@example.com DATABASE_URL=... API_KEYS=dev CATALOG_PATH=examples/catalog.yaml \
+  TERRAKUBE_ORGANIZATION=org TERRAKUBE_UI_URL=https://terrakube.example.com TERRAKUBE_TOKEN=... \
+  uvicorn app.main:create_app --factory --port 8080      # then open http://localhost:8080/ui/
+```
+
+## Quickstart: a lab in five calls (API)
 
 All requests carry the portal's API key and the user (see [identity](docs/portal-integration.md#2-identify-the-user-on-every-call)).
 
@@ -94,7 +107,7 @@ Other users' labs answer `404`, as if they did not exist.
 
 | Read this | If you |
 |---|---|
-| [Portal integration](docs/portal-integration.md) | build the portal: security rules, screens, calls, errors, checklist |
+| [Portal integration](docs/portal-integration.md) | connect another portal or tool to the API: security rules, screens, calls, errors, checklist |
 | [Catalog reference](docs/catalog.md) | write templates: inputs, lifetimes, cost models, variables labs receive |
 | [Deployment](docs/deployment.md) | run the service: Helm values, identity, OpenBao, Terrakube setup, operations |
 | [Changelog](CHANGELOG.md) | upgrade: what changed per version |

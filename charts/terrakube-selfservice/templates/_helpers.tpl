@@ -22,6 +22,9 @@
 {{- if not (or .Values.token.existingSecret.name .Values.token.value (include "tss.openbaoAddr" .)) }}
 {{- fail "set token.existingSecret.name, token.value or openbao.addr" }}
 {{- end }}
+{{- if and .Values.ui.enabled .Values.ui.oidc.issuer (not .Values.existingSecret) (lt (len .Values.ui.sessionSecret) 32) }}
+{{- fail "ui.sessionSecret must be at least 32 characters" }}
+{{- end }}
 {{- if and (not .Values.existingCatalogConfigMap) (not .Values.catalog.templates) }}
 {{- fail "catalog.templates is empty; configure at least one template or set existingCatalogConfigMap" }}
 {{- end }}

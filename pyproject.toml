@@ -1,6 +1,6 @@
 [project]
 name = "terrakube-selfservice"
-version = "0.4.0"
+version = "0.5.0"
 description = "Self-service environments on Terrakube: templates with forms, TTL policy and usage analytics"
 requires-python = ">=3.13"
 license = "MIT"
@@ -12,6 +12,8 @@ dependencies = [
   "psycopg[binary,pool]==3.2.10",
   "pyyaml==6.0.3",
   "pyjwt[crypto]==2.10.1",
+  "authlib==1.6.5",
+  "itsdangerous==2.2.0",
 ]
 
 [build-system]
@@ -20,6 +22,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["app"]
+
+[tool.setuptools.package-data]
+app = ["ui_static/*"]
 
 [project.optional-dependencies]
 test = [

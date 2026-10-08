@@ -76,6 +76,9 @@ class LabService:
         if template is None:
             raise LabError(404, "template not found")
         values, errors = resolve_inputs(template, request.inputs)
+        # Prices never depend on free-text fields, so a form that is still being
+        # filled in (a required field empty) gets an estimate; invalid values do not.
+        errors = [e for e in errors if not e.endswith(": required")]
         if errors:
             raise LabError(422, "; ".join(errors))
         priced = self.catalog.estimate(template, values)

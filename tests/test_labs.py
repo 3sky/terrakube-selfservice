@@ -316,7 +316,9 @@ async def test_estimate_before_create(env):
     body = (await client.post("/v1/templates/aws-lab/estimate", json={"inputs": {"customer": "acme", "size": 2}})).json()
     assert body == {"currency": "USD", "hourly": 0.087, "ttl_hours": 24, "total": 2.09,
                     "items": [{"label": "Nodes", "hourly": 0.072}, {"label": "NodeBalancer", "hourly": 0.015}]}
-    assert (await client.post("/v1/templates/aws-lab/estimate", json={"inputs": {}})).status_code == 422
+    # A required field still empty does not block the estimate; an invalid value does.
+    assert (await client.post("/v1/templates/aws-lab/estimate", json={"inputs": {}})).status_code == 200
+    assert (await client.post("/v1/templates/aws-lab/estimate", json={"inputs": {"size": 9}})).status_code == 422
     assert (await client.post("/v1/templates/nope/estimate", json={})).status_code == 404
 
 

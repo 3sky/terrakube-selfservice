@@ -13,6 +13,10 @@ metadata:
 type: Opaque
 stringData:
   API_KEYS: {{ required "apiKeys is required" (join "," .Values.apiKeys) | quote }}
+  {{- if .Values.ui.enabled }}
+  UI_OIDC_CLIENT_SECRET: {{ .Values.ui.oidc.clientSecret | quote }}
+  UI_SESSION_SECRET: {{ .Values.ui.sessionSecret | quote }}
+  {{- end }}
   {{- with .Values.database }}
   DATABASE_URL: {{ printf "postgresql://%s:%s@%s:%v/%s?sslmode=%s" .user (required "database.password is required" .password) (required "database.host is required" .host) .port .name .sslmode | quote }}
   {{- end }}
@@ -53,7 +57,7 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
       annotations:
         # Restart on catalog or credential changes.
-        checksum/config: {{ printf "%s|%s|%s|%s" (toJson .Values.catalog) (toJson .Values.apiKeys) (toJson .Values.database) .Values.token.value | sha256sum }}
+        checksum/config: {{ printf "%s|%s|%s|%s|%s" (toJson .Values.catalog) (toJson .Values.apiKeys) (toJson .Values.database) .Values.token.value (toJson .Values.ui) | sha256sum }}
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
       {{- with .Values.imagePullSecrets }}
@@ -123,6 +127,22 @@ spec:
             - name: USER_TOKEN_EMAIL_CLAIM
               value: {{ .emailClaim | quote }}
             {{- end }}
+            {{- end }}
+            {{- if .Values.ui.enabled }}
+            - name: UI_ENABLED
+              value: "true"
+            - name: UI_PUBLIC_URL
+              value: {{ required "ui.publicUrl is required when ui.enabled" .Values.ui.publicUrl | quote }}
+            - name: UI_TITLE
+              value: {{ .Values.ui.title | quote }}
+            - name: UI_OIDC_ISSUER
+              value: {{ .Values.ui.oidc.issuer | quote }}
+            - name: UI_OIDC_CLIENT_ID
+              value: {{ .Values.ui.oidc.clientId | quote }}
+            - name: UI_OIDC_SCOPES
+              value: {{ .Values.ui.oidc.scopes | quote }}
+            - name: UI_SESSION_MAX_AGE_HOURS
+              value: {{ .Values.ui.sessionMaxAgeHours | quote }}
             {{- end }}
             - name: RECONCILE_INTERVAL_SECONDS
               value: {{ .Values.reconcileIntervalSeconds | quote }}
@@ -208,7 +228,7 @@ spec:
           urlRewrite:
             path:
               type: ReplacePrefixMatch
-              replacePrefixMatch: /
+              replacePrefixMatch: {{ .Values.route.rewritePrefix }}
       backendRefs:
         - name: {{ $name }}
           port: 8080

@@ -92,11 +92,32 @@ serviceAccount:
   # Bind this name in your OpenBao/Vault Kubernetes auth role.
   name: terrakube-selfservice
 
-# Optional Gateway API route; the prefix is stripped before the service.
+# --- Web portal ---------------------------------------------------------------
+# Built-in UI at /ui: catalog, form with cost estimate, labs, access details,
+# admin views. Users sign in with OIDC (for example Dex); /v1 is unchanged.
+ui:
+  enabled: false
+  # Address users open, e.g. https://lab.example.com/portal (route.* can map
+  # that prefix to /ui). Used for links, the cookie path and the OIDC callback
+  # <publicUrl>/auth/callback.
+  publicUrl: ""
+  title: Lab self-service
+  oidc:
+    issuer: ""
+    clientId: ""
+    clientSecret: ""
+    scopes: openid email profile
+  # At least 32 random characters; signs the session cookie.
+  sessionSecret: ""
+  sessionMaxAgeHours: 8
+
+# Optional Gateway API route. pathPrefix is replaced by rewritePrefix before
+# the service: "/" publishes the API (/selfservice/v1/...), "/ui" only the portal.
 route:
   enabled: false
   hostnames: []
   pathPrefix: /selfservice
+  rewritePrefix: /
   parentRefs: []
 
 resources:
