@@ -69,8 +69,11 @@ token:
 
 # --- Users ------------------------------------------------------------------
 users:
-  # May see and act on every lab and read analytics.
+  # Roles (cumulative): everyone who signs in is a user (own labs only).
+  # Auditors also see every lab, its history and cost, and the reports.
+  # Admins also act on any lab and read its access details.
   adminEmails: []
+  auditorEmails: []
   # Token mode: identify users by their OIDC ID token (X-User-Token) instead of
   # the X-Actor-Email header set by the portal backend. Recommended.
   token:

@@ -18,6 +18,7 @@ API_KEY = "test-key"
 ALICE = {"X-Actor-Email": "alice@example.com"}
 BOB = {"X-Actor-Email": "bob@example.com"}
 ADMIN = {"X-Actor-Email": "admin@example.com"}
+AUDITOR = {"X-Actor-Email": "auditor@example.com"}
 
 
 class FakeAccessStore:
@@ -126,7 +127,8 @@ async def env(database):
         await conn.execute("TRUNCATE lab_events, labs")
     terrakube = FakeTerrakube()
     service = LabService(settings(), CATALOG, database, terrakube, access_store=FakeAccessStore())
-    app = build_app(service=service, run_reconciler=False, identity=IdentityResolver(("admin@example.com",)))
+    identity = IdentityResolver(("admin@example.com",), auditor_emails=("auditor@example.com",))
+    app = build_app(service=service, run_reconciler=False, identity=identity)
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test",

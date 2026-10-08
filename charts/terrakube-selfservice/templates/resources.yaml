@@ -116,6 +116,8 @@ spec:
               value: {{ .Values.access.secretPath | quote }}
             - name: ADMIN_EMAILS
               value: {{ join "," .Values.users.adminEmails | quote }}
+            - name: AUDITOR_EMAILS
+              value: {{ join "," .Values.users.auditorEmails | quote }}
             {{- with .Values.users.token }}
             {{- if .issuer }}
             - name: USER_TOKEN_ISSUER

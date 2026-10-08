@@ -64,7 +64,8 @@ The chart refuses to install when the catalog is invalid, no Terrakube token sou
 | `token.*` | | Where the Terrakube token comes from ([below](#the-terrakube-token)) |
 | `openbao.addr`, `openbao.role` | `""`, `terrakube-selfservice` | OpenBao/Vault with Kubernetes auth; enables the access endpoint |
 | `access.secretPath` | `secret/data/labs/{name}` | Where templates publish access details |
-| `users.adminEmails` | `[]` | Admins: all labs and analytics |
+| `users.adminEmails` | `[]` | Admins: act on any lab, plus everything auditors can |
+| `users.auditorEmails` | `[]` | Auditors: view every lab and the reports, act only on their own labs |
 | `users.token.*` | | Token mode ([below](#users)) |
 | `serviceAccount.name` | `terrakube-selfservice` | Service account bound in OpenBao/Vault |
 | `reconcileIntervalSeconds` | `30` | How often labs are checked and expired |
@@ -91,7 +92,7 @@ Every lab request identifies an end user. Pick the mode that matches the portal 
 - **Token mode (recommended):** set `users.token.issuer` and `users.token.audience` to the OIDC provider and client the portal signs users in with. The service verifies the ID token in `X-User-Token` against the issuer's signing keys (from its discovery document, or `users.token.jwksUrl`) and uses the `email` claim (`users.token.emailClaim`).
 - **Header mode (default):** the service trusts `X-Actor-Email` from the portal backend. Only safe when the portal sets it from its own session.
 
-Admins (`users.adminEmails`) see and act on every lab and read analytics.
+Roles, cumulative: everyone who signs in is a **user** (own labs only); **auditors** (`users.auditorEmails`) also see every lab, its history and cost, and the reports; **admins** (`users.adminEmails`) also act on any lab and read its access details. See the [role table](../README.md#roles).
 
 ## OpenBao or Vault
 
@@ -185,7 +186,7 @@ For running the image without the chart:
 | `OPENBAO_ADDR`, `OPENBAO_ROLE` | , `terrakube-selfservice` | OpenBao/Vault; enables access details and the token source |
 | `OPENBAO_SECRET_PATH`, `OPENBAO_SECRET_KEY` | `secret/data/terrakube-selfservice`, `terrakube_token` | Token in OpenBao |
 | `ACCESS_SECRET_PATH` | `secret/data/labs/{name}` | Access details path |
-| `ADMIN_EMAILS` | | Comma-separated admins |
+| `ADMIN_EMAILS`, `AUDITOR_EMAILS` | | Comma-separated admins and auditors |
 | `USER_TOKEN_ISSUER`, `USER_TOKEN_AUDIENCE`, `USER_TOKEN_JWKS_URL`, `USER_TOKEN_EMAIL_CLAIM` | , , discovery, `email` | Token mode |
 | `RECONCILE_INTERVAL_SECONDS` | `30` | Loop interval |
 | `PENDING_TIMEOUT_MINUTES` | `10` | When a stuck `pending` lab is marked failed |

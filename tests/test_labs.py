@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from conftest import ADMIN, BOB, CATALOG, age
+from conftest import ADMIN, AUDITOR, BOB, CATALOG, age
 
 from app.catalog import resolve_inputs
 
@@ -79,7 +79,10 @@ async def test_create_provisions_workspace(env):
     assert ws["name"] == "lab-acme-repro" and ws["folder"] == "/aws-lab" and ws["vcs_id"] == "vcs-1"
     variables = {v["key"]: v for v in ws["variables"]}
     assert variables["customer"]["category"] == "TERRAFORM"
-    assert variables["secret"]["sensitive"] is True
+    assert variables["secret"]["sensitive"] is True and variables["secret"]["value"] == "s3cret"
+    # The service's own record never holds the sensitive value.
+    stored = await service.db.get_lab(lab["id"])
+    assert stored["inputs"]["secret"] == "***" and stored["inputs"]["customer"] == "acme"
     assert variables["AWS_DEFAULT_REGION"]["category"] == "ENV"
     assert variables["TF_VAR_lab_owner"]["value"] == "alice@example.com"
     assert terrakube.jobs["job-1"]["template"] == "Plan and apply"
@@ -427,3 +430,38 @@ async def test_tag_failure_does_not_fail_the_lab(env):
     terrakube.fail_tags = True
     response = await client.post("/v1/labs", json=NEW_LAB)
     assert response.status_code == 202 and response.json()["status"] == "provisioning"
+
+
+async def test_role_matrix(env):
+    """user: own labs; auditor: reads everything, acts on nothing of others; admin: everything."""
+    client, service, terrakube = env
+    lab = (await client.post("/v1/labs", json=NEW_LAB)).json()  # owned by alice (a user)
+    terrakube.jobs["job-1"]["status"] = "completed"
+    await service.reconcile()
+    service.access_store.secrets["secret/data/labs/acme-repro"] = {"kubeconfig": "k"}
+    url = f"/v1/labs/{lab['id']}"
+
+    # Auditor: sees all labs, the lab, its history and the reports...
+    assert len((await client.get("/v1/labs", headers=AUDITOR)).json()["items"]) == 1
+    assert (await client.get(url, headers=AUDITOR)).status_code == 200
+    assert (await client.get(f"{url}/events", headers=AUDITOR)).status_code == 200
+    for report in ("summary", "costs", "timeseries"):
+        assert (await client.get(f"/v1/analytics/{report}", headers=AUDITOR)).status_code == 200
+    # ...but cannot read secrets or act on someone else's lab.
+    assert (await client.get(f"{url}/access", headers=AUDITOR)).status_code == 403
+    assert (await client.post(f"{url}/extend", json={"hours": 1}, headers=AUDITOR)).status_code == 403
+    assert (await client.post(f"{url}/destroy", headers=AUDITOR)).status_code == 403
+    assert (await client.post(f"{url}/retry", headers=AUDITOR)).status_code == 403
+    for_other = {**NEW_LAB, "name": "for-other", "owner_email": "bob@example.com"}
+    assert (await client.post("/v1/labs", json=for_other, headers=AUDITOR)).status_code == 403
+    # An auditor's own labs work like a user's.
+    own = {**NEW_LAB, "name": "auditor-lab", "owner_email": None}
+    assert (await client.post("/v1/labs", json=own, headers=AUDITOR)).status_code == 202
+
+    # User: no reports, no other labs.
+    assert (await client.get("/v1/analytics/summary", headers=BOB)).status_code == 403
+    assert (await client.get(url, headers=BOB)).status_code == 404
+
+    # Admin: secrets and actions on anyone's lab.
+    assert (await client.get(f"{url}/access", headers=ADMIN)).status_code == 200
+    assert (await client.post(f"{url}/extend", json={"hours": 1}, headers=ADMIN)).status_code == 200

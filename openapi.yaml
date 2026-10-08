@@ -20,10 +20,11 @@ info:
     from a browser.
 
 
-    **Ownership.** Users see and act on their own labs; another user''s lab answers
-    `404`. Admins see all labs and the
+    **Roles.** `user`: own labs only (another user''s lab answers `404`). `auditor`:
+    also reads every lab and the
 
-    analytics.
+    analytics, but cannot act on other people''s labs or read their access details
+    (`403`). `admin`: everything.
 
 
     **Lifecycle.** `pending` → `provisioning` → `ready` or `failed` → `destroying`
@@ -39,7 +40,7 @@ info:
 
 
     Integration guide: https://github.com/3sky/terrakube-selfservice/blob/main/docs/portal-integration.md'
-  version: 0.5.1
+  version: 0.6.1
 paths:
   /v1/templates:
     get:
@@ -243,9 +244,9 @@ paths:
           anyOf:
           - type: string
           - type: 'null'
-          description: Admins only; other users always see their own labs.
+          description: Auditors and admins; users always see their own labs.
           title: Owner Email
-        description: Admins only; other users always see their own labs.
+        description: Auditors and admins; users always see their own labs.
       - name: status
         in: query
         required: false
@@ -392,7 +393,7 @@ paths:
       - labs
       summary: Access details of a ready lab
       description: 'Kubeconfig, passwords, URLs published by the template. Owner or
-        admin only; every read is audited.
+        admin only (auditors get 403); every read is audited.
 
 
         The response is marked `Cache-Control: no-store`: show it to the user, never
@@ -441,6 +442,12 @@ paths:
                 $ref: '#/components/schemas/LabAccess'
         '401':
           description: Missing or invalid API key or user identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: The user may not do this
           content:
             application/json:
               schema:
@@ -534,6 +541,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '403':
+          description: The user may not do this
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         '404':
           description: Not found, or not visible to this user
           content:
@@ -603,6 +616,12 @@ paths:
                 $ref: '#/components/schemas/Lab'
         '401':
           description: Missing or invalid API key or user identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: The user may not do this
           content:
             application/json:
               schema:
@@ -690,6 +709,12 @@ paths:
                 $ref: '#/components/schemas/Lab'
         '401':
           description: Missing or invalid API key or user identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: The user may not do this
           content:
             application/json:
               schema:
@@ -787,7 +812,7 @@ paths:
     get:
       tags:
       - analytics
-      summary: Usage summary (admins)
+      summary: Usage summary (auditors, admins)
       operationId: analytics_summary
       security:
       - HTTPBearer: []
@@ -854,7 +879,7 @@ paths:
     get:
       tags:
       - analytics
-      summary: Estimated cost per owner and template (admins)
+      summary: Estimated cost per owner and template (auditors, admins)
       description: Lab-hours and estimated cost in the window, per owner (split by
         template) and per template.
       operationId: analytics_costs
@@ -923,7 +948,7 @@ paths:
     get:
       tags:
       - analytics
-      summary: Daily created, destroyed and expired labs (admins)
+      summary: Daily created, destroyed and expired labs (auditors, admins)
       operationId: analytics_timeseries
       security:
       - HTTPBearer: []
@@ -1726,7 +1751,8 @@ tags:
 - name: templates
   description: 'The catalog: templates, their form inputs, and cost estimates.'
 - name: labs
-  description: Create labs and follow, extend, retry, destroy and access them. Scoped
-    to the calling user; admins see all.
+  description: Create labs and follow, extend, retry, destroy and access them. Users
+    see their own labs, auditors and admins see all; only owners and admins act on
+    a lab.
 - name: analytics
-  description: Usage and estimated cost reports. Admins only.
+  description: Usage and estimated cost reports. Auditors and admins.

@@ -46,8 +46,8 @@ lifetime ends.
 user: a verified OIDC ID token in `X-User-Token` (token mode) or `X-Actor-Email` set by the portal backend from its
 own session (header mode). Call the service from the portal backend only, never from a browser.
 
-**Ownership.** Users see and act on their own labs; another user's lab answers `404`. Admins see all labs and the
-analytics.
+**Roles.** `user`: own labs only (another user's lab answers `404`). `auditor`: also reads every lab and the
+analytics, but cannot act on other people's labs or read their access details (`403`). `admin`: everything.
 
 **Lifecycle.** `pending` → `provisioning` → `ready` or `failed` → `destroying` → `destroyed` or `destroy_failed`.
 Poll a lab every 15-30 s while it is `pending` or `provisioning`.
@@ -61,8 +61,8 @@ Integration guide: https://github.com/3sky/terrakube-selfservice/blob/main/docs/
 OPENAPI_TAGS = [
     {"name": "templates", "description": "The catalog: templates, their form inputs, and cost estimates."},
     {"name": "labs", "description": "Create labs and follow, extend, retry, destroy and access them. "
-                                    "Scoped to the calling user; admins see all."},
-    {"name": "analytics", "description": "Usage and estimated cost reports. Admins only."},
+                                    "Users see their own labs, auditors and admins see all; only owners and admins act on a lab."},
+    {"name": "analytics", "description": "Usage and estimated cost reports. Auditors and admins."},
 ]
 
 
@@ -97,12 +97,13 @@ async def _reconcile_forever(service: LabService, interval: int) -> None:
 
 def identity_from_settings(cfg: Settings) -> IdentityResolver:
     if not cfg.user_token_issuer:
-        return IdentityResolver(cfg.admin_emails)
+        return IdentityResolver(cfg.admin_emails, auditor_emails=cfg.auditor_emails)
     import jwt
 
     jwks_url = cfg.user_token_jwks_url or discover_jwks_url(cfg.user_token_issuer)
     return IdentityResolver(
-        cfg.admin_emails, issuer=cfg.user_token_issuer, audience=cfg.user_token_audience,
+        cfg.admin_emails, auditor_emails=cfg.auditor_emails, issuer=cfg.user_token_issuer,
+        audience=cfg.user_token_audience,
         signing_keys=jwt.PyJWKClient(jwks_url, cache_keys=True, lifespan=600), email_claim=cfg.user_token_email_claim,
     )
 
@@ -159,7 +160,7 @@ def build_app(
 
     app = FastAPI(
         title="Terrakube Self-Service",
-        version="0.5.1",
+        version="0.6.1",
         description=API_DESCRIPTION,
         openapi_tags=OPENAPI_TAGS,
         lifespan=lifespan,
@@ -184,9 +185,9 @@ def build_app(
         except IdentityError as error:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(error)) from None
 
-    async def admin_caller(caller: Annotated[Caller, Depends(current_caller)]) -> Caller:
-        if not caller.admin:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "admins only")
+    async def reports_caller(caller: Annotated[Caller, Depends(current_caller)]) -> Caller:
+        if not caller.sees_all:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "auditors and admins only")
         return caller
 
     Service = Annotated[LabService, Depends(current_service)]
@@ -199,10 +200,10 @@ def build_app(
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
-    def add_routes(router: APIRouter, user_dep, admin_dep, deps: list) -> None:
+    def add_routes(router: APIRouter, user_dep, reports_dep, deps: list) -> None:
         """Templates, labs and analytics, for one way of identifying the caller (API or UI)."""
         User = Annotated[Caller, Depends(user_dep)]  # noqa: N806
-        Admin = Annotated[Caller, Depends(admin_dep)]  # noqa: N806
+        Reporter = Annotated[Caller, Depends(reports_dep)]  # noqa: N806
 
         @router.get("/templates", response_model=TemplateList, dependencies=deps, tags=["templates"],
                  summary="List lab templates", responses=errors())
@@ -234,13 +235,13 @@ def build_app(
         async def list_labs(
             svc: Service,
             caller: User,
-            owner_email: Annotated[str | None, Query(description="Admins only; other users always see their own labs.")] = None,
+            owner_email: Annotated[str | None, Query(description="Auditors and admins; users always see their own labs.")] = None,
             lab_status: Annotated[LabStatus | None, Query(alias="status")] = None,
             template_id: str | None = None,
             include_destroyed: bool = False,
             limit: Annotated[int, Query(ge=1, le=500)] = 100,
         ) -> LabList:
-            owner = (owner_email.lower() if owner_email else None) if caller.admin else caller.email
+            owner = (owner_email.lower() if owner_email else None) if caller.sees_all else caller.email
             rows = await svc.db.list_labs(
                 owner=owner, status=lab_status, template_id=template_id,
                 include_destroyed=include_destroyed or lab_status == LabStatus.destroyed, limit=limit,
@@ -250,12 +251,12 @@ def build_app(
         @router.get("/labs/{lab_id}", response_model=Lab, dependencies=deps, tags=["labs"], summary="Get a lab",
                  responses=errors(404))
         async def get_lab(lab_id: UUID, svc: Service, caller: User) -> Lab:
-            return svc.to_model(await svc.get_owned(lab_id, caller))
+            return svc.to_model(await svc.get_visible(lab_id, caller))
 
         @router.get("/labs/{lab_id}/access", response_model=LabAccess, dependencies=deps, tags=["labs"],
-                 summary="Access details of a ready lab", responses=errors(404, 409, 501, 502))
+                 summary="Access details of a ready lab", responses=errors(403, 404, 409, 501, 502))
         async def lab_access(lab_id: UUID, svc: Service, caller: User, response: Response) -> LabAccess:
-            """Kubeconfig, passwords, URLs published by the template. Owner or admin only; every read is audited.
+            """Kubeconfig, passwords, URLs published by the template. Owner or admin only (auditors get 403); every read is audited.
 
             The response is marked `Cache-Control: no-store`: show it to the user, never cache, log or store it.
             """
@@ -264,18 +265,18 @@ def build_app(
             return LabAccess(lab_id=row["id"], name=row["name"], values=values)
 
         @router.post("/labs/{lab_id}/extend", response_model=Lab, dependencies=deps, tags=["labs"],
-                  summary="Extend a lab's TTL", responses=errors(404, 409, 422))
+                  summary="Extend a lab's TTL", responses=errors(403, 404, 409, 422))
         async def extend_lab(lab_id: UUID, body: ExtendRequest, svc: Service, caller: User) -> Lab:
             return svc.to_model(await svc.extend(lab_id, body.hours, caller))
 
         @router.post("/labs/{lab_id}/retry", response_model=Lab, status_code=status.HTTP_202_ACCEPTED,
-                  dependencies=deps, tags=["labs"], summary="Retry a failed lab", responses=errors(404, 409, 502))
+                  dependencies=deps, tags=["labs"], summary="Retry a failed lab", responses=errors(403, 404, 409, 502))
         async def retry_lab(lab_id: UUID, svc: Service, caller: User) -> Lab:
             """Runs the apply again in the lab's existing workspace; the lab goes back to `provisioning`."""
             return svc.to_model(await svc.retry(lab_id, caller))
 
         @router.post("/labs/{lab_id}/destroy", response_model=Lab, status_code=status.HTTP_202_ACCEPTED,
-                  dependencies=deps, tags=["labs"], summary="Destroy a lab now", responses=errors(404, 409, 502))
+                  dependencies=deps, tags=["labs"], summary="Destroy a lab now", responses=errors(403, 404, 409, 502))
         async def destroy_lab(lab_id: UUID, svc: Service, caller: User, body: DestroyRequest | None = None) -> Lab:
             """Queues a destroy job; the workspace is deleted once it completes. Also retries a `destroy_failed` lab."""
             reason = (body.reason if body and body.reason else None) or "requested"
@@ -284,31 +285,31 @@ def build_app(
         @router.get("/labs/{lab_id}/events", response_model=LabEventList, dependencies=deps, tags=["labs"],
                  summary="Audit trail of a lab", responses=errors(404))
         async def lab_events(lab_id: UUID, svc: Service, caller: User) -> LabEventList:
-            await svc.get_owned(lab_id, caller)
+            await svc.get_visible(lab_id, caller)
             return LabEventList(items=await svc.db.events(lab_id))
 
         @router.get("/analytics/summary", response_model=AnalyticsSummary, dependencies=deps, tags=["analytics"],
-                 summary="Usage summary (admins)", responses=errors(403, 422))
+                 summary="Usage summary (auditors, admins)", responses=errors(403, 422))
         async def analytics_summary(
-            svc: Service, _: Admin, days: Annotated[int, Query(ge=1, le=365)] = 30
+            svc: Service, _: Reporter, days: Annotated[int, Query(ge=1, le=365)] = 30
         ) -> AnalyticsSummary:
             return AnalyticsSummary(window_days=days, **await svc.db.summary(now() - timedelta(days=days)))
 
         @router.get("/analytics/costs", response_model=CostReport, dependencies=deps, tags=["analytics"],
-                 summary="Estimated cost per owner and template (admins)", responses=errors(403, 422))
-        async def analytics_costs(svc: Service, _: Admin, days: Annotated[int, Query(ge=1, le=365)] = 30) -> CostReport:
+                 summary="Estimated cost per owner and template (auditors, admins)", responses=errors(403, 422))
+        async def analytics_costs(svc: Service, _: Reporter, days: Annotated[int, Query(ge=1, le=365)] = 30) -> CostReport:
             """Lab-hours and estimated cost in the window, per owner (split by template) and per template."""
             return await svc.cost_report(days)
 
         @router.get("/analytics/timeseries", response_model=AnalyticsTimeseries, dependencies=deps, tags=["analytics"],
-                 summary="Daily created, destroyed and expired labs (admins)", responses=errors(403, 422))
+                 summary="Daily created, destroyed and expired labs (auditors, admins)", responses=errors(403, 422))
         async def analytics_timeseries(
-            svc: Service, _: Admin, days: Annotated[int, Query(ge=1, le=365)] = 30
+            svc: Service, _: Reporter, days: Annotated[int, Query(ge=1, le=365)] = 30
         ) -> AnalyticsTimeseries:
             return AnalyticsTimeseries(window_days=days, points=await svc.db.timeseries(now() - timedelta(days=days)))
 
     api = APIRouter(prefix="/v1")
-    add_routes(api, current_caller, admin_caller, [Depends(authenticated)])
+    add_routes(api, current_caller, reports_caller, [Depends(authenticated)])
     app.include_router(api)
 
     if ui_settings is not None:

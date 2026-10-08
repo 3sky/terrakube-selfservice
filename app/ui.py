@@ -102,11 +102,11 @@ def mount_ui(app: FastAPI, cfg: UISettings, add_routes: Callable) -> None:
         email = session_email(request)
         if email is None:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "sign-in required")
-        return Caller(email=email, admin=email in request.app.state.identity.admin_emails)
+        return request.app.state.identity.caller(email)
 
-    async def session_admin(caller: Caller = Depends(session_caller)) -> Caller:
-        if not caller.admin:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "admins only")
+    async def session_reporter(caller: Caller = Depends(session_caller)) -> Caller:
+        if not caller.sees_all:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "auditors and admins only")
         return caller
 
     async def from_portal(x_requested_with: str | None = Header(default=None)) -> None:
@@ -120,9 +120,9 @@ def mount_ui(app: FastAPI, cfg: UISettings, add_routes: Callable) -> None:
 
     @ui_api.get("/me", dependencies=[Depends(from_portal)])
     async def me(caller: Caller = Depends(session_caller)) -> dict:
-        return {"email": caller.email, "admin": caller.admin}
+        return {"email": caller.email, "role": caller.role, "admin": caller.admin, "sees_all": caller.sees_all}
 
-    add_routes(ui_api, session_caller, session_admin, [Depends(from_portal)])
+    add_routes(ui_api, session_caller, session_reporter, [Depends(from_portal)])
     app.include_router(ui_api)
 
     pages = APIRouter(prefix="/ui", include_in_schema=False)

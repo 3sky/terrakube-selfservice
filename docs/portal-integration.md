@@ -18,7 +18,7 @@ flowchart LR
 
 ## 2. Identify the user on every call
 
-Every lab call acts on behalf of one user. Users only see and change their own labs; another user's lab answers `404`, so its existence is not revealed. Admins see all labs and the analytics.
+Every lab call acts on behalf of one user, with one of three [roles](../README.md#roles). Users only see and change their own labs; another user's lab answers `404`, so its existence is not revealed. Auditors also see every lab and the reports, but get `403` when acting on someone else's lab. Admins can do everything.
 
 Use one of two modes (the service operator configures which):
 
@@ -160,9 +160,9 @@ POST /v1/labs
 | Retry | `POST /v1/labs/{id}/retry` | Re-runs a `failed` lab's apply in its workspace; `409` explains when that is not possible |
 | Destroy | `POST /v1/labs/{id}/destroy` `{"reason": "done"}` | Ask for confirmation first. The lab goes to `destroying`, then `destroyed` |
 
-### Admin views
+### Reports
 
-For admins only (`403` for other users):
+For auditors and admins (`403` for users):
 
 - `GET /v1/analytics/summary?days=30`: labs by status, `active_labs`, `needs_attention` (labs whose cleanup failed), created, destroyed, expired, failures, and per template: lifetimes and time to ready.
 - `GET /v1/analytics/timeseries?days=30`: created, destroyed and expired labs per day, for a chart.
@@ -175,7 +175,7 @@ Every error body is `{"detail": "..."}`; for `422` it is a list of field errors.
 | Code | Meaning | Portal behaviour |
 |---|---|---|
 | 401 | Bad API key, or missing or invalid user identity | Alert operators (key), or sign the user in again (token) |
-| 403 | Not allowed for this user | Hide admin-only actions |
+| 403 | Not allowed for this user's role | Hide actions the role cannot use (see [roles](../README.md#roles)) |
 | 404 | Not found, or another user's lab | Treat both as "lab not found" |
 | 409 | Not possible in the lab's current state | Show `detail` and reload the lab |
 | 422 | Invalid input | Show next to the form fields |
@@ -190,4 +190,4 @@ Every error body is `{"detail": "..."}`; for `422` it is a list of field errors.
 - [ ] Polling stops when the status settles and backs off on errors.
 - [ ] Access details are fetched on demand and never cached, stored or logged.
 - [ ] Destroy asks for confirmation.
-- [ ] Admin-only views are hidden from other users.
+- [ ] Reports are shown only to auditors and admins, and actions on other people's labs only to admins.

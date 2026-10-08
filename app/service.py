@@ -141,11 +141,18 @@ class LabService:
             raise LabError(404, "lab not found")
         return row
 
-    async def get_owned(self, lab_id: UUID, caller: Caller) -> dict[str, Any]:
-        """The lab if the caller owns it or is an admin; otherwise 404, so other users' labs stay invisible."""
+    async def get_visible(self, lab_id: UUID, caller: Caller) -> dict[str, Any]:
+        """For reading (status, history, cost): the owner, auditors and admins. Others get 404."""
         row = await self.get(lab_id)
-        if not caller.admin and row["owner_email"].lower() != caller.email:
+        if not caller.sees_all and row["owner_email"].lower() != caller.email:
             raise LabError(404, "lab not found")
+        return row
+
+    async def get_owned(self, lab_id: UUID, caller: Caller) -> dict[str, Any]:
+        """For acting and access details: the owner and admins. Auditors get 403, others 404."""
+        row = await self.get_visible(lab_id, caller)
+        if not caller.admin and row["owner_email"].lower() != caller.email:
+            raise LabError(403, "only the lab's owner or an admin can do this")
         return row
 
     # --- create ------------------------------------------------------------
@@ -169,8 +176,12 @@ class LabService:
         lab_id = uuid.uuid4()
         created = now()
         priced = self.catalog.estimate(template, values)
+        # Sensitive inputs (passwords) go to Terrakube as sensitive variables only;
+        # the lab record keeps a placeholder.
+        sensitive = {i.name for i in template.inputs if i.sensitive}
+        stored = {k: ("***" if k in sensitive else v) for k, v in values.items()}
         name = await self._insert(
-            request, lab_id, template.id, values, created + timedelta(hours=ttl), actor,
+            request, lab_id, template.id, stored, created + timedelta(hours=ttl), actor,
             hourly_cost=priced[0] if priced else None,
         )
 
@@ -192,7 +203,6 @@ class LabService:
                 lab_id, workspace_id=workspace_id,
                 workspace_url=await self.terrakube.workspace_url(workspace_id),
             )
-            sensitive = {i.name for i in template.inputs if i.sensitive}
             for key, value in {**template.variables, **values}.items():
                 await self.terrakube.add_variable(
                     workspace_id, key=key, value=value, category="TERRAFORM",

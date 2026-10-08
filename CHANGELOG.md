@@ -2,6 +2,16 @@
 
 Image `ghcr.io/3sky/terrakube-selfservice` and chart `oci://ghcr.io/3sky/charts/terrakube-selfservice` share these versions.
 
+## 0.6.1
+
+- Sensitive form inputs (for example a personal Red Hat password) are no longer stored in the service's database: they go to the Terrakube workspace as sensitive variables only, and the lab record keeps `***`.
+
+## 0.6.0
+
+- Roles: `user` (own labs), `auditor` (also views every lab, its history and cost, and the reports) and `admin` (also acts on any lab). Chart `users.auditorEmails` / `AUDITOR_EMAILS`.
+- Auditors get `403` when acting on, or reading the access details of, someone else's lab. Reports (`/v1/analytics/*`) are open to auditors as well as admins.
+- Portal: "Admin" is now "Reports", shown to auditors and admins; labs of others open read-only, without the Access tab; header logo removed.
+
 ## 0.5.1
 
 - Portal look aligned with the Terrakube UI: dark header with a purple active section, breadcrumbs, content on a white panel, Ant Design-style buttons, badges and form fields.

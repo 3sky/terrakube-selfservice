@@ -21,7 +21,8 @@ def ui_settings(**overrides) -> UISettings:
 
 async def client_for(database, ui: UISettings):
     service = LabService(settings(), CATALOG, database, FakeTerrakube(), access_store=FakeAccessStore())
-    app = build_app(service=service, run_reconciler=False, identity=IdentityResolver(("admin@example.com",)), ui=ui)
+    identity = IdentityResolver(("admin@example.com",), auditor_emails=("auditor@example.com",))
+    app = build_app(service=service, run_reconciler=False, identity=identity, ui=ui)
     return app, service
 
 
@@ -48,7 +49,8 @@ async def test_page_and_static_assets(portal):
 async def test_ui_api_uses_session_user_and_needs_portal_header(portal):
     client, _ = portal
     assert (await client.get("/ui/api/me")).status_code == 403  # no X-Requested-With
-    assert (await client.get("/ui/api/me", headers=PORTAL)).json() == {"email": "alice@example.com", "admin": False}
+    assert (await client.get("/ui/api/me", headers=PORTAL)).json() == {
+        "email": "alice@example.com", "role": "user", "admin": False, "sees_all": False}
 
     body = {"template_id": "aws-lab", "inputs": {"customer": "acme"}}
     # The session decides who acts: a header claiming another user is ignored.
@@ -95,3 +97,15 @@ async def test_api_unchanged_when_ui_enabled(portal):
     assert (await client.get("/v1/templates")).status_code == 401
     spec = (await client.get("/openapi.json")).json()
     assert not any(path.startswith("/ui") for path in spec["paths"])
+
+
+async def test_ui_auditor_role(portal, database):
+    client, _ = portal
+    lab = (await client.post("/ui/api/labs", json={"template_id": "aws-lab", "inputs": {"customer": "acme"}}, headers=PORTAL)).json()
+    app, _ = await client_for(database, ui_settings(dev_user_email="auditor@example.com"))
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as auditor:
+            assert (await auditor.get("/ui/api/me", headers=PORTAL)).json()["role"] == "auditor"
+            assert (await auditor.get(f"/ui/api/labs/{lab['id']}", headers=PORTAL)).status_code == 200
+            assert (await auditor.get("/ui/api/analytics/costs", headers=PORTAL)).status_code == 200
+            assert (await auditor.post(f"/ui/api/labs/{lab['id']}/destroy", headers=PORTAL)).status_code == 403

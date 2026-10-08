@@ -14,7 +14,6 @@ a { color: var(--link); }
 /* Header */
 header { display: flex; align-items: center; gap: 28px; height: 64px; padding: 0 24px; background: var(--header); }
 .brand { display: flex; align-items: center; gap: 10px; color: #fff; text-decoration: none; font-size: 16px; font-weight: 600; white-space: nowrap; }
-.logo { width: 30px; height: 30px; }
 nav { display: flex; gap: 6px; flex: 1; height: 100%; align-items: center; }
 nav a { display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 16px; border-radius: 8px; color: var(--header-text); text-decoration: none; font-size: 15px; }
 nav a:hover { color: #fff; }

@@ -178,21 +178,21 @@ async function newLabView(templateId) {
 async function labsView() {
   const history = new URLSearchParams(location.hash.split("?")[1]).has("history");
   const { items } = await api(`labs${history ? "?include_destroyed=true" : ""}`);
-  crumbs([me.admin ? "Labs" : "My labs"]);
+  crumbs([me.sees_all ? "Labs" : "My labs"]);
   const rows = items.map((l) =>
     h("tr", { class: "click", onclick: () => (location.hash = `#/labs/${l.id}`) },
       h("td", {}, h("b", {}, l.name), h("div", { class: "note" }, l.template_id)),
-      me.admin ? h("td", {}, l.owner_email) : null,
+      me.sees_all ? h("td", {}, l.owner_email) : null,
       h("td", {}, badge(l.status)),
       h("td", {}, l.status === "destroyed" ? when(l.destroyed_at) : untilText(l.expires_at)),
       h("td", {}, money(l.estimated_cost, l.currency || "USD"))));
   show(
-    h("h1", {}, me.admin ? "Labs (all owners)" : "My labs"),
+    h("h1", {}, me.sees_all ? "Labs (all owners)" : "My labs"),
     h("div", { class: "actions" },
       h("a", { class: "button", href: "#/catalog" }, "New lab"),
       h("a", { class: "button secondary", href: history ? "#/labs" : "#/labs?history" }, history ? "Hide destroyed" : "Show destroyed")),
     items.length
-      ? h("table", {}, h("tr", {}, h("th", {}, "Lab"), me.admin ? h("th", {}, "Owner") : null, h("th", {}, "Status"), h("th", {}, history ? "Expires / destroyed" : "Expires"), h("th", {}, "Cost so far")), rows)
+      ? h("table", {}, h("tr", {}, h("th", {}, "Lab"), me.sees_all ? h("th", {}, "Owner") : null, h("th", {}, "Status"), h("th", {}, history ? "Expires / destroyed" : "Expires"), h("th", {}, "Cost so far")), rows)
       : h("p", { class: "muted" }, "No labs yet."),
   );
   pollWhile(items.some((l) => !SETTLED.has(l.status)), () => route());
@@ -255,10 +255,12 @@ async function copy(text) {
 async function labView(id) {
   const [lab, { items: events }] = await Promise.all([api(`labs/${id}`), api(`labs/${id}/events`)]);
   const currency = lab.currency || "USD";
-  const live = !["destroying", "destroyed"].includes(lab.status);
+  // Auditors may view any lab; only its owner or an admin may act on it or read its access details.
+  const canAct = me.admin || lab.owner_email === me.email;
+  const live = canAct && !["destroying", "destroyed"].includes(lab.status);
   const tab = new URLSearchParams(location.hash.split("?")[1]).get("tab") || "overview";
   const hours = h("select", {}, [1, 2, 4, 8, 24].map((n) => h("option", { value: n }, `+${n} h`)));
-  crumbs([me.admin ? "Labs" : "My labs", "#/labs"], [lab.name]);
+  crumbs([me.sees_all ? "Labs" : "My labs", "#/labs"], [lab.name]);
 
   const overview = [
     h("dl", { class: "facts" },
@@ -274,13 +276,15 @@ async function labView(id) {
       h("dt", {}, "Inputs"), h("dd", {}, Object.entries(lab.inputs).map(([k, v]) => h("div", {}, `${k} = ${v}`))),
       lab.workspace_url && [h("dt", {}, "Terrakube"), h("dd", {}, h("a", { href: lab.workspace_url, target: "_blank", rel: "noopener" }, "Workspace and run logs"))]),
     h("div", { class: "actions" },
-      ["ready", "provisioning", "pending", "failed"].includes(lab.status)
+      canAct && ["ready", "provisioning", "pending", "failed"].includes(lab.status)
         ? [hours, h("button", { class: "secondary", onclick: () => act(`labs/${id}/extend`, { hours: Number(hours.value) }, "Lifetime extended") }, "Extend")]
         : null,
-      lab.status === "failed" ? h("button", { class: "secondary", onclick: () => act(`labs/${id}/retry`, null, "Retrying") }, "Retry") : null,
+      canAct && lab.status === "failed" ? h("button", { class: "secondary", onclick: () => act(`labs/${id}/retry`, null, "Retrying") }, "Retry") : null,
       live ? h("button", { class: "danger", onclick: () => confirm(`Destroy ${lab.name}? This cannot be undone.`) && act(`labs/${id}/destroy`, { reason: "requested in portal" }, "Destroying") }, "Destroy") : null),
   ];
-  const access = lab.status === "ready"
+  const access = !canAct
+    ? [h("p", { class: "muted" }, "Only the lab's owner and admins can see its access details.")]
+    : lab.status === "ready"
     ? [accessBlock(lab), h("p", { class: "note" }, "Fetched only when you ask, and recorded in the lab's history.")]
     : [h("p", { class: "muted" }, "Access details are available once the lab is ready.")];
   const history = h("ul", { class: "events" }, events.slice().reverse().map((e) =>
@@ -299,7 +303,7 @@ async function labView(id) {
         : h("span", {}, h("small", {}, "Expires"), untilText(lab.expires_at)),
       h("span", {}, h("small", {}, "Cost so far"), money(lab.estimated_cost, currency)),
       h("span", {}, h("small", {}, "Hourly"), money(lab.estimated_hourly_cost, currency))),
-    h("div", { class: "tabs" }, tabButton("overview", "Overview"), tabButton("access", "Access"), tabButton("history", `History (${events.length})`)),
+    h("div", { class: "tabs" }, tabButton("overview", "Overview"), canAct ? tabButton("access", "Access") : null, tabButton("history", `History (${events.length})`)),
     panes[tab] || overview,
   );
   pollWhile(!SETTLED.has(lab.status) && tab === "overview", () => route());
@@ -307,14 +311,14 @@ async function labView(id) {
 
 // ---- admin -----------------------------------------------------------------
 
-async function adminView() {
+async function reportsView() {
   const days = Number(new URLSearchParams(location.hash.split("?")[1]).get("days") || 30);
-  const [summary, costs] = await Promise.all([api(`analytics/summary?days=${days}`), api(`analytics/costs?days=${days}`)]);
-  crumbs(["Admin"]);
+    const [summary, costs] = await Promise.all([api(`analytics/summary?days=${days}`), api(`analytics/costs?days=${days}`)]);
+  crumbs(["Reports"]);
   const stat = (value, label) => h("div", { class: "stat" }, h("b", {}, value), h("span", {}, label));
   show(
-    h("h1", {}, "Admin"),
-    h("div", { class: "actions" }, [7, 30, 90].map((d) => h("a", { class: `button ${d === days ? "" : "secondary"}`, href: `#/admin?days=${d}` }, `${d} days`))),
+    h("h1", {}, "Reports"),
+    h("div", { class: "actions" }, [7, 30, 90].map((d) => h("a", { class: `button ${d === days ? "" : "secondary"}`, href: `#/reports?days=${d}` }, `${d} days`))),
     h("div", { class: "stats" },
       stat(summary.active_labs, "active labs"),
       stat(summary.needs_attention, "need attention"),
@@ -349,7 +353,7 @@ async function route() {
     if (parts[0] === "new" && parts[1]) await newLabView(parts[1]);
     else if (parts[0] === "labs" && parts[1]) await labView(parts[1]);
     else if (parts[0] === "labs") await labsView();
-    else if (parts[0] === "admin" && me.admin) await adminView();
+    else if (parts[0] === "reports" && me.sees_all) await reportsView();
     else await catalogView();
   } catch (error) {
     show(h("h1", {}, "Something went wrong"), h("p", {}, error.message), h("p", {}, h("a", { href: "#/labs" }, "My labs")));
@@ -359,7 +363,7 @@ async function route() {
 (async () => {
   me = await api("me");
   document.getElementById("user-email").textContent = me.email;
-  document.getElementById("nav-admin").hidden = !me.admin;
+  document.getElementById("nav-reports").hidden = !me.sees_all;
   window.addEventListener("hashchange", route);
   route();
 })();

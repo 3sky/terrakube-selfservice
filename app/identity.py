@@ -24,10 +24,28 @@ class IdentityError(Exception):
     pass
 
 
+ROLES = ("user", "auditor", "admin")
+
+
 @dataclass(frozen=True)
 class Caller:
+    """The end user of a request. Roles are cumulative: admin > auditor > user.
+
+    user     create labs; view and act on their own labs (including access details)
+    auditor  + view every lab, its history and cost, and the usage and cost reports
+    admin    + act on any lab (access details, extend, retry, destroy), create labs for others
+    """
+
     email: str
-    admin: bool
+    role: str = "user"
+
+    @property
+    def admin(self) -> bool:
+        return self.role == "admin"
+
+    @property
+    def sees_all(self) -> bool:
+        return self.role in ("auditor", "admin")
 
 
 class SigningKeys(Protocol):
@@ -36,10 +54,11 @@ class SigningKeys(Protocol):
 
 class IdentityResolver:
     def __init__(
-        self, admin_emails: tuple[str, ...], *, issuer: str | None = None, audience: str | None = None,
-        signing_keys: SigningKeys | None = None, email_claim: str = "email",
+        self, admin_emails: tuple[str, ...], *, auditor_emails: tuple[str, ...] = (), issuer: str | None = None,
+        audience: str | None = None, signing_keys: SigningKeys | None = None, email_claim: str = "email",
     ):
         self.admin_emails = {e.lower() for e in admin_emails}
+        self.auditor_emails = {e.lower() for e in auditor_emails}
         self.token_mode = issuer is not None
         self._issuer, self._audience, self._keys, self._email_claim = issuer, audience, signing_keys, email_claim
 
@@ -48,7 +67,12 @@ class IdentityResolver:
         if not email or "@" not in email:
             raise IdentityError("X-User-Token is required" if self.token_mode else "X-Actor-Email is required")
         email = email.lower()
-        return Caller(email=email, admin=email in self.admin_emails)
+        return self.caller(email)
+
+    def caller(self, email: str) -> Caller:
+        email = email.lower()
+        role = "admin" if email in self.admin_emails else "auditor" if email in self.auditor_emails else "user"
+        return Caller(email=email, role=role)
 
     async def _from_token(self, token: str | None) -> str:
         if not token:

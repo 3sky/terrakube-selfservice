@@ -17,11 +17,11 @@ flowchart LR
 
 | Feature | What users and admins get |
 |---|---|
-| **Web portal** | Built in and optional: sign in (OIDC, for example Dex), pick a template, see the cost while filling in the form, follow your labs, download access details, extend, retry or destroy; admins get usage and cost views. Plain HTML and JavaScript, no build step. |
+| **Web portal** | Built in and optional: sign in (OIDC, for example Dex), pick a template, see the cost while filling in the form, follow your labs, download access details, extend, retry or destroy; auditors and admins get usage and cost reports. Plain HTML and JavaScript, no build step. |
 | **Catalog with forms** | Templates are Git folders with a Terraform/OpenTofu module. Each declares typed form inputs (text, number, yes/no, choice; required, defaults, patterns, ranges). Portals build their forms from the API, so a new template needs no portal release. |
 | **Lifetimes (TTL)** | Every lab has an expiry: a default and a maximum per template. Owners can extend up to the maximum. Expired labs are destroyed and their workspace removed, without anyone remembering to. |
 | **Access handover** | Templates publish what the owner needs (kubeconfig, passwords, URLs) to OpenBao or Vault. The API returns it only to the owner or an admin, never cached, and records every read. |
-| **Ownership** | Users see and act only on their own labs; admins see all. Users are identified by a verified OIDC token or by the portal. |
+| **Roles** | `user`, `auditor`, `admin` ([table below](#roles)). Users see and act only on their own labs; auditors also see every lab and the reports; admins can act on any lab. |
 | **Cost estimates** | List prices from the catalog: an estimate before creating, the cost so far per lab, and a report per owner and template. |
 | **Analytics and audit** | Labs per template and owner, failures, expiries, lifetimes, time to ready; a full event history per lab. |
 | **Tidy Terrakube** | Lab workspaces sit in a `Self-service` project, tagged `lab_owner:<email>` and `expires_at:<UTC time>`, so admins can filter them in the Terrakube UI. |
@@ -48,7 +48,7 @@ A background loop checks Terrakube every 30 seconds, moves labs along, and destr
 
 ## The portal
 
-Enable it with the chart's `ui.*` values ([deployment](docs/deployment.md#web-portal)). It is served at `/ui`, typically published as `https://<host>/portal`, and uses the same rules as the API: users see only their own labs, admins see everything. Its pages live in [`app/ui_static/`](app/ui_static) (one HTML file, one JavaScript file, one stylesheet) and call `/ui/api/*`, the same endpoints as `/v1` with the user taken from the session.
+Enable it with the chart's `ui.*` values ([deployment](docs/deployment.md#web-portal)). It is served at `/ui`, typically published as `https://<host>/portal`, and uses the same [roles](#roles) as the API. Its pages live in [`app/ui_static/`](app/ui_static) (one HTML file, one JavaScript file, one stylesheet) and call `/ui/api/*`, the same endpoints as `/v1` with the user taken from the session.
 
 For local development, run without sign-in as a fixed user:
 
@@ -85,6 +85,20 @@ curl -s "${H[@]}" $URL/v1/labs/$LAB/access | jq -r .values.kubeconfig > lab.kube
 
 The service also serves interactive API docs at `/docs` and the contract at `/openapi.json` ([`openapi.yaml`](openapi.yaml) in this repository).
 
+## Roles
+
+Everyone who signs in is a **user**. Auditors and admins are lists in the deployment (`users.auditorEmails`, `users.adminEmails`); roles are cumulative.
+
+| Permission | user | auditor | admin |
+|---|:-:|:-:|:-:|
+| Templates and cost estimates | ✓ | ✓ | ✓ |
+| Create labs for themselves | ✓ | ✓ | ✓ |
+| Own labs: view, access details, extend, retry, destroy | ✓ | ✓ | ✓ |
+| All labs: view status, history, cost | | ✓ | ✓ |
+| Usage and cost reports | | ✓ | ✓ |
+| Other people's labs: access details, extend, retry, destroy | | | ✓ |
+| Create labs for someone else | | | ✓ |
+
 ## API at a glance
 
 | Endpoint | Who | Purpose |
@@ -92,16 +106,16 @@ The service also serves interactive API docs at `/docs` and the contract at `/op
 | `GET /v1/templates`, `GET /v1/templates/{id}` | any user | Templates and their form inputs |
 | `POST /v1/templates/{id}/estimate` | any user | Cost estimate for form inputs and a lifetime |
 | `POST /v1/labs` | any user | Create a lab |
-| `GET /v1/labs`, `GET /v1/labs/{id}` | owner, admin | Labs, status, expiry, cost so far |
+| `GET /v1/labs`, `GET /v1/labs/{id}` | owner, auditor, admin | Labs, status, expiry, cost so far |
 | `GET /v1/labs/{id}/access` | owner, admin | Access details of a ready lab (audited) |
 | `POST /v1/labs/{id}/extend` | owner, admin | Add hours, up to the template's maximum |
 | `POST /v1/labs/{id}/retry` | owner, admin | Re-run a failed lab's apply |
 | `POST /v1/labs/{id}/destroy` | owner, admin | Destroy now |
-| `GET /v1/labs/{id}/events` | owner, admin | History of the lab |
-| `GET /v1/analytics/summary`, `/timeseries` | admin | Usage |
-| `GET /v1/analytics/costs` | admin | Estimated cost per owner and template |
+| `GET /v1/labs/{id}/events` | owner, auditor, admin | History of the lab |
+| `GET /v1/analytics/summary`, `/timeseries` | auditor, admin | Usage |
+| `GET /v1/analytics/costs` | auditor, admin | Estimated cost per owner and template |
 
-Other users' labs answer `404`, as if they did not exist.
+For a user, other people's labs answer `404`, as if they did not exist. An auditor gets `403` when trying to act on, or read the access details of, someone else's lab.
 
 ## Documentation
 

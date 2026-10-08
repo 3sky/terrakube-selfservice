@@ -39,6 +39,7 @@ class Settings:
     # USER_TOKEN_ISSUER set, users are identified by a verified OIDC token
     # (X-User-Token) instead of the X-Actor-Email header.
     admin_emails: tuple[str, ...] = ()
+    auditor_emails: tuple[str, ...] = ()
     user_token_issuer: str | None = None
     user_token_audience: str | None = None
     user_token_jwks_url: str | None = None
@@ -82,6 +83,7 @@ class Settings:
             pending_timeout_minutes=int(os.environ.get("PENDING_TIMEOUT_MINUTES", "10")),
             delete_workspace_after_destroy=_bool(os.environ.get("DELETE_WORKSPACE_AFTER_DESTROY"), True),
             admin_emails=tuple(e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()),
+            auditor_emails=tuple(e.strip().lower() for e in os.environ.get("AUDITOR_EMAILS", "").split(",") if e.strip()),
             user_token_issuer=(os.environ.get("USER_TOKEN_ISSUER") or "").rstrip("/") or None,
             user_token_audience=os.environ.get("USER_TOKEN_AUDIENCE") or None,
             user_token_jwks_url=os.environ.get("USER_TOKEN_JWKS_URL") or None,
