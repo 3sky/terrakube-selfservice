@@ -159,7 +159,7 @@ def build_app(
 
     app = FastAPI(
         title="Terrakube Self-Service",
-        version="0.5.0",
+        version="0.5.1",
         description=API_DESCRIPTION,
         openapi_tags=OPENAPI_TAGS,
         lifespan=lifespan,

@@ -2,6 +2,12 @@
 
 Image `ghcr.io/3sky/terrakube-selfservice` and chart `oci://ghcr.io/3sky/charts/terrakube-selfservice` share these versions.
 
+## 0.5.1
+
+- Portal look aligned with the Terrakube UI: dark header with a purple active section, breadcrumbs, content on a white panel, Ant Design-style buttons, badges and form fields.
+- Lab page laid out like a Terrakube workspace: name, ID with copy, a facts row (status, expiry, cost so far, hourly price) and Overview / Access / History tabs.
+- Fixed: access details showed "[object HTMLElement]" instead of the values. They now list each value, with the kubeconfig as a download and passwords hidden until revealed.
+
 ## 0.5.0
 
 - Built-in web portal at `/ui` (chart `ui.*`, off by default): OIDC sign-in, catalog with forms and live cost estimates, labs with status, expiry and cost, access details with kubeconfig download, extend, retry, destroy, history, and admin usage and cost views. Plain HTML and JavaScript in `app/ui_static/`.

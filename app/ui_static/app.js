@@ -19,14 +19,24 @@ function h(tag, attrs = {}, ...children) {
     else if (key === "class") el.className = value;
     else el.setAttribute(key, value === true ? "" : value);
   }
-  for (const child of children.flat()) {
-    if (child == null || child === false) continue;
-    el.append(child instanceof Node ? child : document.createTextNode(String(child)));
-  }
+  el.append(...nodes(children));
   return el;
 }
 
-function show(...nodes) { view.replaceChildren(...nodes); }
+// Nested arrays and empty values (null, false) are allowed wherever nodes are.
+const nodes = (items) => items.flat(Infinity).filter((n) => n != null && n !== false)
+  .map((n) => (n instanceof Node ? n : document.createTextNode(String(n))));
+
+function show(...items) { view.replaceChildren(...nodes(items)); }
+
+// Breadcrumb under the header: crumbs(["Labs", "#/labs"], ["jwolynko-k3x9p"])
+function crumbs(...items) {
+  const trail = [["Self-service", "#/catalog"], ...items];
+  document.getElementById("crumbs").replaceChildren(...nodes(trail.map(([label, href], i) => [
+    i ? h("span", { class: "sep" }, "/") : null,
+    href && i < trail.length - 1 ? h("a", { href }, label) : h("b", {}, label),
+  ])));
+}
 
 function toast(message, error = false) {
   const el = document.getElementById("toast");
@@ -77,6 +87,7 @@ function pollWhile(condition, refresh) {
 
 async function catalogView() {
   const { items } = await api("templates");
+  crumbs(["New lab"]);
   show(
     h("h1", {}, "New lab"),
     h("div", { class: "cards" }, items.map((t) =>
@@ -157,7 +168,8 @@ async function newLabView(templateId) {
       submit.disabled = false;
     }
   });
-  show(h("h1", {}, `New lab: ${t.name}`), h("p", { class: "muted" }, t.description || ""), form);
+  crumbs(["New lab", "#/catalog"], [t.name]);
+  show(h("h1", {}, `New lab: ${t.name}`), h("p", { class: "subtitle" }, t.description || ""), h("div", { style: "height:16px" }), form);
   refreshEstimate();
 }
 
@@ -166,6 +178,7 @@ async function newLabView(templateId) {
 async function labsView() {
   const history = new URLSearchParams(location.hash.split("?")[1]).has("history");
   const { items } = await api(`labs${history ? "?include_destroyed=true" : ""}`);
+  crumbs([me.admin ? "Labs" : "My labs"]);
   const rows = items.map((l) =>
     h("tr", { class: "click", onclick: () => (location.hash = `#/labs/${l.id}`) },
       h("td", {}, h("b", {}, l.name), h("div", { class: "note" }, l.template_id)),
@@ -196,12 +209,12 @@ async function act(path, body, message) {
 }
 
 function accessBlock(lab) {
-  const box = h("div", {});
+  const box = h("div", { class: "access" });
   const button = h("button", { class: "secondary", onclick: async () => {
     button.disabled = true;
     try {
       const { values } = await api(`labs/${lab.id}/access`);
-      box.replaceChildren(h("h2", {}, "Access details"), h("dl", { class: "facts" }, Object.entries(values).map(([key, value]) => {
+      box.replaceChildren(h("dl", { class: "facts" }, Object.entries(values).map(([key, value]) => {
         const multiline = value.includes("\n");
         const secret = /pass|token|secret|key/i.test(key);
         let dd;
@@ -242,10 +255,12 @@ async function copy(text) {
 async function labView(id) {
   const [lab, { items: events }] = await Promise.all([api(`labs/${id}`), api(`labs/${id}/events`)]);
   const currency = lab.currency || "USD";
-  const hours = h("select", {}, [1, 2, 4, 8, 24].map((n) => h("option", { value: n }, `+${n} h`)));
   const live = !["destroying", "destroyed"].includes(lab.status);
-  show(
-    h("h1", {}, lab.name, " ", badge(lab.status)),
+  const tab = new URLSearchParams(location.hash.split("?")[1]).get("tab") || "overview";
+  const hours = h("select", {}, [1, 2, 4, 8, 24].map((n) => h("option", { value: n }, `+${n} h`)));
+  crumbs([me.admin ? "Labs" : "My labs", "#/labs"], [lab.name]);
+
+  const overview = [
     h("dl", { class: "facts" },
       h("dt", {}, "Template"), h("dd", {}, lab.template_id),
       h("dt", {}, "Owner"), h("dd", {}, lab.owner_email),
@@ -255,21 +270,39 @@ async function labView(id) {
       lab.status === "destroyed"
         ? [h("dt", {}, "Destroyed"), h("dd", {}, `${when(lab.destroyed_at)} (${lab.destroy_reason || "–"})`)]
         : [h("dt", {}, "Expires"), h("dd", {}, `${when(lab.expires_at)} (${untilText(lab.expires_at)})`)],
-      h("dt", {}, "Estimated cost"), h("dd", {}, `${money(lab.estimated_cost, currency)} so far · ${money(lab.estimated_hourly_cost, currency)}/h`),
-      h("dt", {}, "Inputs"), h("dd", {}, Object.entries(lab.inputs).map(([k, v]) => `${k}=${v}`).join(", ") || "–"),
+      h("dt", {}, "Extensions"), h("dd", {}, lab.extension_count),
+      h("dt", {}, "Inputs"), h("dd", {}, Object.entries(lab.inputs).map(([k, v]) => h("div", {}, `${k} = ${v}`))),
       lab.workspace_url && [h("dt", {}, "Terrakube"), h("dd", {}, h("a", { href: lab.workspace_url, target: "_blank", rel: "noopener" }, "Workspace and run logs"))]),
     h("div", { class: "actions" },
-      lab.status === "ready" ? accessBlock(lab) : null,
       ["ready", "provisioning", "pending", "failed"].includes(lab.status)
         ? [hours, h("button", { class: "secondary", onclick: () => act(`labs/${id}/extend`, { hours: Number(hours.value) }, "Lifetime extended") }, "Extend")]
         : null,
       lab.status === "failed" ? h("button", { class: "secondary", onclick: () => act(`labs/${id}/retry`, null, "Retrying") }, "Retry") : null,
       live ? h("button", { class: "danger", onclick: () => confirm(`Destroy ${lab.name}? This cannot be undone.`) && act(`labs/${id}/destroy`, { reason: "requested in portal" }, "Destroying") }, "Destroy") : null),
-    h("h2", {}, "History"),
-    h("ul", { class: "events" }, events.slice().reverse().map((e) => h("li", {}, h("time", {}, when(e.at)), e.type.replaceAll("_", " "), e.actor ? ` · ${e.actor}` : ""))),
-    h("p", {}, h("a", { href: "#/labs" }, "← All labs")),
+  ];
+  const access = lab.status === "ready"
+    ? [accessBlock(lab), h("p", { class: "note" }, "Fetched only when you ask, and recorded in the lab's history.")]
+    : [h("p", { class: "muted" }, "Access details are available once the lab is ready.")];
+  const history = h("ul", { class: "events" }, events.slice().reverse().map((e) =>
+    h("li", {}, h("time", {}, when(e.at)), e.type.replaceAll("_", " "), e.actor ? ` · ${e.actor}` : "")));
+  const panes = { overview, access, history };
+  const tabButton = (key, label) => h("button", { class: tab === key ? "active" : "", onclick: () => (location.hash = `#/labs/${id}?tab=${key}`) }, label);
+
+  show(
+    h("h1", {}, lab.name),
+    h("div", { class: "idline" }, `ID: ${lab.id}`, h("button", { class: "copy", title: "Copy ID", onclick: () => copy(lab.id) }, "⧉")),
+    h("p", { class: "subtitle" }, `${lab.template_id} for ${lab.owner_email}`),
+    h("div", { class: "factsrow" },
+      h("span", {}, badge(lab.status)),
+      lab.status === "destroyed"
+        ? h("span", {}, h("small", {}, "Destroyed"), when(lab.destroyed_at))
+        : h("span", {}, h("small", {}, "Expires"), untilText(lab.expires_at)),
+      h("span", {}, h("small", {}, "Cost so far"), money(lab.estimated_cost, currency)),
+      h("span", {}, h("small", {}, "Hourly"), money(lab.estimated_hourly_cost, currency))),
+    h("div", { class: "tabs" }, tabButton("overview", "Overview"), tabButton("access", "Access"), tabButton("history", `History (${events.length})`)),
+    panes[tab] || overview,
   );
-  pollWhile(!SETTLED.has(lab.status), () => route());
+  pollWhile(!SETTLED.has(lab.status) && tab === "overview", () => route());
 }
 
 // ---- admin -----------------------------------------------------------------
@@ -277,6 +310,7 @@ async function labView(id) {
 async function adminView() {
   const days = Number(new URLSearchParams(location.hash.split("?")[1]).get("days") || 30);
   const [summary, costs] = await Promise.all([api(`analytics/summary?days=${days}`), api(`analytics/costs?days=${days}`)]);
+  crumbs(["Admin"]);
   const stat = (value, label) => h("div", { class: "stat" }, h("b", {}, value), h("span", {}, label));
   show(
     h("h1", {}, "Admin"),
@@ -287,7 +321,7 @@ async function adminView() {
       stat(summary.created, "created"),
       stat(summary.expired, "expired"),
       stat(summary.provision_failures, "failed to provision"),
-      stat(money(costs.estimated_cost, costs.currency), `estimated cost, ${Math.round(costs.lab_hours)} lab-hours`)),
+      stat(money(costs.estimated_cost, costs.currency), `estimated cost, ${costs.lab_hours.toFixed(1)} lab-hours`)),
     h("h2", {}, "Cost per owner"),
     h("table", {},
       h("tr", {}, h("th", {}, "Owner"), h("th", {}, "Template"), h("th", {}, "Labs"), h("th", {}, "Lab-hours"), h("th", {}, "Estimated cost")),
