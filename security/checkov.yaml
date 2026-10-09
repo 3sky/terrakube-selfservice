@@ -1,0 +1,14 @@
+# Checkov on the rendered Helm chart (security workflow). Each skip is a
+# deliberate decision; see SECURITY-REVIEW.md before adding one.
+framework: [kubernetes]
+compact: true
+quiet: true
+skip-check:
+  # CPU limits cause throttling; memory is limited and CPU is requested.
+  - CKV_K8S_11
+  # IfNotPresent is right for immutable, signed tags and digests (image.digest).
+  - CKV_K8S_15
+  # The default image reference is a cosign-signed release tag; image.digest pins it.
+  - CKV_K8S_43
+  # Follow-up: the app reads API_KEYS and DATABASE_URL from the environment only.
+  - CKV_K8S_35

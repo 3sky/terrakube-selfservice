@@ -1,0 +1,6 @@
+# zizmor configuration (security workflow). Every exception states its reason.
+rules:
+  # GitHub's "$/" self-repository syntax is not understood by actionlint 1.7.12;
+  # "./.github/workflows/..." is the documented form and resolves to this repo.
+  self-repository:
+    disable: true

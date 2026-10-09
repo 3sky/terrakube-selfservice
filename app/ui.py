@@ -5,9 +5,13 @@ caller comes from the signed-in session instead of an API key and header.
 Enabled with UI_ENABLED=true; /v1 is unchanged either way.
 """
 
+import hashlib
+import html
 import logging
 import os
+import secrets
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
@@ -18,17 +22,24 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from .identity import Caller
+from .config import _bool, require_tls
+from .identity import Caller, IdentityError, verified_email
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "ui_static"
 UI_HEADER = "selfservice-ui"
 
-
-def _bool(value: str | None, default: bool) -> bool:
-    if value is None or value == "":
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+# Every /ui response. The portal is plain same-origin script and CSS, so the
+# policy allows no inline script, inline style, eval or framing.
+SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
+        "base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "same-origin",
+}
 
 
 @dataclass(frozen=True)
@@ -47,6 +58,7 @@ class UISettings:
     session_https_only: bool
     dev_user_email: str | None
     title: str
+    require_verified_email: bool = True
 
     @property
     def base_path(self) -> str:
@@ -63,6 +75,8 @@ class UISettings:
         secret = os.environ.get("UI_SESSION_SECRET", "")
         if issuer and len(secret) < 32:
             raise RuntimeError("UI_SESSION_SECRET must be at least 32 characters")
+        if issuer:
+            require_tls("UI_OIDC_ISSUER", issuer, _bool(os.environ.get("ALLOW_INSECURE_TRANSPORT"), False))
         return cls(
             public_url=os.environ.get("UI_PUBLIC_URL", "http://localhost:8080/ui").rstrip("/"),
             oidc_issuer=issuer,
@@ -74,11 +88,22 @@ class UISettings:
             session_https_only=_bool(os.environ.get("UI_SESSION_HTTPS_ONLY"), issuer is not None),
             dev_user_email=dev_user if issuer is None else None,
             title=os.environ.get("UI_TITLE", "Lab self-service"),
+            require_verified_email=_bool(os.environ.get("REQUIRE_VERIFIED_EMAIL"), True),
         )
 
 
 def mount_ui(app: FastAPI, cfg: UISettings, add_routes: Callable) -> None:
     base = cfg.base_path
+    login_href = html.escape(f"{base}/login")
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/ui" or request.url.path.startswith("/ui/"):
+            for name, value in SECURITY_HEADERS.items():
+                response.headers.setdefault(name, value)
+        return response
+
     app.add_middleware(
         SessionMiddleware, secret_key=cfg.session_secret, session_cookie="selfservice_session",
         max_age=cfg.session_max_age_hours * 3600, same_site="lax", https_only=cfg.session_https_only,
@@ -92,14 +117,23 @@ def mount_ui(app: FastAPI, cfg: UISettings, add_routes: Callable) -> None:
             client_kwargs={"scope": cfg.oidc_scopes},
         )
 
-    def session_email(request: Request) -> str | None:
+    public = urlparse(cfg.public_url)
+    public_origin = f"{public.scheme}://{public.netloc}"
+
+    def session_hash(request: Request) -> str | None:
+        sid = request.session.get("sid")
+        return hashlib.sha256(sid.encode()).hexdigest() if isinstance(sid, str) else None
+
+    async def session_email(request: Request) -> str | None:
         if cfg.dev_user_email:
             return cfg.dev_user_email.lower()
-        user = request.session.get("user")
-        return user["email"] if user else None
+        digest = session_hash(request)
+        if digest is None:
+            return None
+        return await request.app.state.service.db.session_email(digest, datetime.now(UTC))
 
     async def session_caller(request: Request) -> Caller:
-        email = session_email(request)
+        email = await session_email(request)
         if email is None:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "sign-in required")
         return request.app.state.identity.caller(email)
@@ -133,10 +167,10 @@ def mount_ui(app: FastAPI, cfg: UISettings, add_routes: Callable) -> None:
 
     @pages.get("/")
     async def index(request: Request):
-        if session_email(request) is None:
+        if await session_email(request) is None:
             return RedirectResponse(f"{base}/login")
-        html = (STATIC / "index.html").read_text().replace("%BASE%", f"{base}/").replace("%TITLE%", cfg.title)
-        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+        page = (STATIC / "index.html").read_text().replace("%BASE%", html.escape(f"{base}/")).replace("%TITLE%", html.escape(cfg.title))
+        return HTMLResponse(page, headers={"Cache-Control": "no-store"})
 
     @pages.get("/login")
     async def login(request: Request):
@@ -149,21 +183,37 @@ def mount_ui(app: FastAPI, cfg: UISettings, add_routes: Callable) -> None:
         try:
             token = await oauth.oidc.authorize_access_token(request)
         except OAuthError as error:
-            log.warning("sign-in failed: %s", error)
-            return HTMLResponse(f"<p>Sign-in failed ({error.error}). <a href='{base}/login'>Try again</a></p>",
-                                status_code=401)
-        claims = token.get("userinfo") or {}
-        email = (claims.get("email") or "").lower()
-        if not email or claims.get("email_verified") is False:
+            # error comes from the callback's query string (before the state is
+            # checked): log it, never echo it into the page.
+            log.warning("sign-in failed: %r", error.error)
+            return HTMLResponse(f'<p>Sign-in failed. <a href="{login_href}">Try again</a></p>', status_code=401)
+        try:
+            email = verified_email(token.get("userinfo") or {}, require_verified=cfg.require_verified_email)
+        except IdentityError:
             return HTMLResponse("<p>Your account has no verified email address.</p>", status_code=403)
+        sid = secrets.token_urlsafe(32)
+        created = datetime.now(UTC)
+        await request.app.state.service.db.create_session(
+            hashlib.sha256(sid.encode()).hexdigest(), email, created, created + timedelta(hours=cfg.session_max_age_hours),
+        )
         request.session.clear()
-        request.session["user"] = {"email": email, "name": claims.get("name") or email}
+        request.session["sid"] = sid
         return RedirectResponse(f"{base}/")
 
     @pages.get("/logout")
+    async def logout_page():
+        # GET changes nothing (a link or image on another site cannot sign users out).
+        return HTMLResponse(f'<form method="post" action="{html.escape(base)}/logout"><button type="submit">Sign out</button></form>')
+
+    @pages.post("/logout")
     async def logout(request: Request):
+        origin = request.headers.get("origin")
+        if origin is not None and origin != public_origin:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "cross-site sign-out refused")
+        if (digest := session_hash(request)) is not None:
+            await request.app.state.service.db.delete_session(digest)
         request.session.clear()
-        return HTMLResponse(f"<p>Signed out. <a href='{base}/login'>Sign in again</a></p>")
+        return HTMLResponse(f'<p>Signed out. <a href="{login_href}">Sign in again</a></p>')
 
     app.include_router(pages)
     app.mount("/ui/static", StaticFiles(directory=STATIC), name="ui-static")

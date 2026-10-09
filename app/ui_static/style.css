@@ -92,3 +92,7 @@ dl.facts dt { color: var(--muted); } dl.facts dd { margin: 0; word-break: break-
 .events time { color: var(--muted); margin-right: 10px; }
 #toast { position: fixed; bottom: 24px; right: 24px; max-width: 420px; background: #fff; color: var(--text); padding: 10px 16px; border-radius: 8px; box-shadow: 0 6px 16px rgba(0, 0, 0, .12); border-left: 4px solid var(--ok); }
 #toast.error { border-left-color: var(--bad); }
+
+.spacer { height: 16px; }
+.user form.signout { display: inline; }
+.user form.signout button { background: none; border: 0; padding: 0; color: #fff; text-decoration: underline; font-size: inherit; }

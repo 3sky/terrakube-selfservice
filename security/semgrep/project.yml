@@ -1,0 +1,83 @@
+# Project rules for bug classes found in SECURITY-REVIEW.md. Community rulesets
+# did not catch them. Tests: semgrep --test security/semgrep
+rules:
+  - id: html-response-from-untrusted-input
+    message: >-
+      Request data or an OAuth error reaches an HTML response unescaped
+      (reflected XSS, see SECURITY-REVIEW.md). Escape it with html.escape(), or
+      keep it out of the page.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation"
+      category: security
+    mode: taint
+    pattern-sources:
+      - pattern: $REQ.query_params
+      - pattern: $REQ.path_params
+      - pattern: $REQ.headers
+      - pattern: $REQ.cookies
+      - patterns:
+          - pattern-inside: |
+              try:
+                  ...
+              except OAuthError as $E:
+                  ...
+          - pattern-either:
+              - pattern: $E.error
+              - pattern: $E.description
+              - pattern: str($E)
+    pattern-sanitizers:
+      - pattern: html.escape(...)
+    pattern-sinks:
+      - pattern: HTMLResponse(...)
+      - pattern: HTMLResponse(content=...)
+
+  - id: portal-html-sink
+    message: >-
+      The portal builds the DOM from text nodes only (h() in app.js). Assigning
+      HTML strings bypasses that and the CSP's protection is all that is left.
+    severity: ERROR
+    languages: [javascript]
+    metadata:
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation"
+      category: security
+    pattern-either:
+      - pattern: $X.innerHTML = $V
+      - pattern: $X.outerHTML = $V
+      - pattern: $X.insertAdjacentHTML(...)
+      - pattern: document.write(...)
+      - pattern: eval(...)
+      - pattern: new Function(...)
+
+  - id: plaintext-http-default-url
+    message: >-
+      Default outbound URL uses plain http://. Credentials sent to it travel
+      unprotected (SECURITY-REVIEW.md); require the setting or default to https://.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: "CWE-319: Cleartext Transmission of Sensitive Information"
+      category: security
+    patterns:
+      - pattern-either:
+          - pattern: os.environ.get($K, "$URL")
+          - pattern: os.getenv($K, "$URL")
+      - metavariable-regex:
+          metavariable: $URL
+          regex: ^http://(?!localhost[:/]|127\.0\.0\.1[:/])
+
+  - id: email-verified-fail-open
+    message: >-
+      Only an explicit false is rejected, so a token without email_verified is
+      treated as verified. Roles follow the email: require it to be true
+      (identity.verified_email).
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: "CWE-287: Improper Authentication"
+      category: security
+    pattern-either:
+      - pattern: $C.get("email_verified") is False
+      - pattern: $C.get("email_verified") == False
+      - pattern: $C["email_verified"] is False

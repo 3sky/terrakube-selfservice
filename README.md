@@ -54,7 +54,8 @@ For local development, run without sign-in as a fixed user:
 
 ```bash
 UI_ENABLED=true UI_DEV_USER_EMAIL=you@example.com DATABASE_URL=... API_KEYS=dev CATALOG_PATH=examples/catalog.yaml \
-  TERRAKUBE_ORGANIZATION=org TERRAKUBE_UI_URL=https://terrakube.example.com TERRAKUBE_TOKEN=... \
+  TERRAKUBE_ORGANIZATION=org TERRAKUBE_API_URL=https://terrakube-api.example.com \
+  TERRAKUBE_UI_URL=https://terrakube.example.com TERRAKUBE_TOKEN=... \
   uvicorn app.main:create_app --factory --port 8080      # then open http://localhost:8080/ui/
 ```
 
@@ -125,18 +126,47 @@ For a user, other people's labs answer `404`, as if they did not exist. An audit
 | [Catalog reference](docs/catalog.md) | write templates: inputs, lifetimes, cost models, variables labs receive |
 | [Deployment](docs/deployment.md) | run the service: Helm values, identity, OpenBao, Terrakube setup, operations |
 | [Changelog](CHANGELOG.md) | upgrade: what changed per version |
+| [Security](SECURITY.md) | report a vulnerability; [review and fixes](SECURITY-REVIEW.md) |
+
+## Verifying releases
+
+Images and charts are signed with [cosign](https://docs.sigstore.dev/) by the
+`ci` workflow (keyless, no key to leak) and carry SLSA build provenance; images
+also carry an SPDX SBOM. Verify before deploying, and deploy by digest
+(chart `image.digest`):
+
+```bash
+IMAGE=ghcr.io/3sky/terrakube-selfservice:<version>
+IDENTITY='^https://github\.com/3sky/terrakube-selfservice/\.github/workflows/ci\.yml@refs/(heads/main|tags/v.+)$'
+
+cosign verify "$IMAGE" --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp "$IDENTITY"
+gh attestation verify "oci://$IMAGE" --repo 3sky/terrakube-selfservice                       # provenance
+gh attestation verify "oci://$IMAGE" --repo 3sky/terrakube-selfservice \
+  --predicate-type https://spdx.dev/Document/v2.3                                            # SBOM
+
+# The chart, the same way:
+cosign verify ghcr.io/3sky/charts/terrakube-selfservice:<version> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp "$IDENTITY"
+```
+
+`cosign verify` prints the verified digest; pass it as `image.digest`. Admission
+controllers (Kyverno, Sigstore policy-controller) can enforce the same identity
+in the cluster.
 
 ## Development
 
 ```bash
-python -m venv .venv && . .venv/bin/activate
-pip install -e ".[test]"
+python3.13 -m venv .venv && . .venv/bin/activate
+pip install --require-hashes -r requirements-test.lock
 docker run -d --name tss-db -e POSTGRES_PASSWORD=pw -p 5432:5432 postgres:17-alpine
 TEST_DATABASE_URL=postgresql://postgres:pw@localhost:5432/postgres PYTHONPATH=.:tests pytest tests
 python -m scripts.export_specs   # regenerate openapi.yaml and the catalog/chart schemas
 ```
 
-Tests fail when the committed specs are stale. Releases: push a `vX.Y.Z` tag to publish the image `ghcr.io/<owner>/terrakube-selfservice:X.Y.Z` and the chart `oci://ghcr.io/<owner>/charts/terrakube-selfservice:X.Y.Z`. Pushes to `main` publish an image tagged with the commit SHA.
+Security checks (`.github/workflows/security.yml`) run on every push and pull request and weekly: Semgrep and CodeQL (code), pip-audit and dependency review (dependencies), gitleaks (full history), zizmor and actionlint (workflows), hadolint (Dockerfile), Checkov (rendered chart) and Grype (image). Publishing waits for them, and the image is scanned again before it is pushed. Project-specific Semgrep rules live in `security/semgrep/`, each with a test proving it catches the bug it was written for: `semgrep --test security/semgrep`. Skipped Checkov and zizmor checks are listed with their reasons in `security/checkov.yaml` and `.github/zizmor.yml`.
+
+Tests fail when the committed specs are stale. Dependencies are pinned in `pyproject.toml` and locked with hashes in `requirements.lock` (image) and `requirements-test.lock` (CI); after changing a pin, regenerate both with the `uv pip compile` command in their headers. Releases: push a `vX.Y.Z` tag to publish the image `ghcr.io/<owner>/terrakube-selfservice:X.Y.Z` and the chart `oci://ghcr.io/<owner>/charts/terrakube-selfservice:X.Y.Z`. Pushes to `main` publish an image tagged with the commit SHA.
 
 ## License
 

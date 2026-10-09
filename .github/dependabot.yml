@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Actions are pinned to commit SHAs and the base image to a digest; these keep them current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Releases must be two weeks old before they are proposed (time for a
+    # compromised release to be noticed and pulled).
+    cooldown:
+      default-days: 14
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    # Releases must be two weeks old before they are proposed (time for a
+    # compromised release to be noticed and pulled).
+    cooldown:
+      default-days: 14

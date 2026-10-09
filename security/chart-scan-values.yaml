@@ -1,0 +1,34 @@
+# Values for scanning the rendered chart with every optional feature on
+# (security workflow). Combined with examples/catalog.yaml as `catalog`.
+apiKeys: ["scan-only"]
+database:
+  host: db.example.com
+  password: scan-only
+terrakube:
+  apiUrl: https://terrakube-api.example.com
+  uiUrl: https://terrakube.example.com
+  organization: example
+openbao:
+  addr: https://openbao.example.com
+users:
+  token:
+    issuer: https://sso.example.com
+    audience: portal
+ui:
+  enabled: true
+  publicUrl: https://lab.example.com/portal
+  oidc:
+    issuer: https://sso.example.com
+    clientId: portal
+    clientSecret: scan-only
+  sessionSecret: scan-only-scan-only-scan-only-scan-only
+tls:
+  secretName: terrakube-selfservice-tls
+route:
+  enabled: true
+  hostnames: [lab.example.com]
+  parentRefs: [{name: public, namespace: gateway}]
+networkPolicy:
+  enabled: true
+  ingressFrom:
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: gateway}}

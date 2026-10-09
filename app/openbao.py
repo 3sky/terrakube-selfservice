@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,10 @@ class OpenBaoClient:
 
     async def read(self, path: str) -> dict[str, Any] | None:
         """Read a kv-v2 secret (path like `secret/data/x`); None when it does not exist."""
+        return (await self.read_versioned(path))[0]
+
+    async def read_versioned(self, path: str) -> tuple[dict[str, Any] | None, datetime | None]:
+        """A kv-v2 secret and when its current version was written; (None, None) when it does not exist."""
         for attempt in range(2):
             token = await self._login()
             response = await self._http.get(f"{self._addr}/v1/{path.lstrip('/')}", headers={"X-Vault-Token": token})
@@ -49,8 +54,10 @@ class OpenBaoClient:
                 self._token = None  # token revoked or policy changed: log in again once
                 continue
             if response.status_code == 404:
-                return None
+                return None, None
             if response.status_code != 200:
                 raise OpenBaoError(f"OpenBao read {path} failed: HTTP {response.status_code}")
-            return response.json()["data"]["data"]
+            body = response.json()["data"]
+            created = (body.get("metadata") or {}).get("created_time")
+            return body["data"], datetime.fromisoformat(created) if created else None
         raise OpenBaoError(f"OpenBao read {path} failed: HTTP 403")

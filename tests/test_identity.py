@@ -4,7 +4,7 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from app.identity import IdentityError, IdentityResolver
+from app.identity import IdentityError, IdentityResolver, verified_email
 
 ISSUER = "https://sso.example.com/dex"
 AUDIENCE = "ps-tool"
@@ -47,12 +47,31 @@ async def test_valid_token_identifies_user_and_ignores_header(keypair):
     {"aud": "someone-else"},
     {"exp": int(time.time()) - 10},
     {"email_verified": False},
+    {"email_verified": None},
+    {"email_verified": "true"},
     {"email": ""},
 ])
 async def test_rejected_tokens(keypair, claims):
     private, public = keypair
     with pytest.raises(IdentityError):
         await resolver(public).resolve(None, token(private, **claims))
+
+
+async def test_unverified_email_allowed_only_when_configured(keypair):
+    private, public = keypair
+    lenient = IdentityResolver((), issuer=ISSUER, audience=AUDIENCE, signing_keys=Keys(public),
+                               require_verified_email=False)
+    assert (await lenient.resolve(None, token(private, email_verified=None))).email == "alice@example.com"
+    with pytest.raises(IdentityError):
+        await lenient.resolve(None, token(private, email_verified=False))
+
+
+def test_verified_email():
+    assert verified_email({"email": " Bob@Example.com", "email_verified": True}) == "bob@example.com"
+    assert verified_email({"mail": "b@x.io"}, "mail", require_verified=False) == "b@x.io"
+    for claims in ({"email": "bob@example.com"}, {"email": "bob", "email_verified": True}, {}):
+        with pytest.raises(IdentityError):
+            verified_email(claims)
 
 
 async def test_token_signed_by_another_key_is_rejected(keypair):

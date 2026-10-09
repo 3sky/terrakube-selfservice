@@ -101,7 +101,8 @@ class LabService:
         return priced
 
     async def cost_report(self, days: int) -> CostReport:
-        lines = await self.db.cost_lines(now() - timedelta(days=days))
+        moment = now()
+        lines = await self.db.cost_lines(moment - timedelta(days=days), moment)
         owners: dict[str, OwnerCost] = {}
         templates: dict[str, CostLine] = {}
         for line in lines:
@@ -181,7 +182,7 @@ class LabService:
         sensitive = {i.name for i in template.inputs if i.sensitive}
         stored = {k: ("***" if k in sensitive else v) for k, v in values.items()}
         name = await self._insert(
-            request, lab_id, template.id, stored, created + timedelta(hours=ttl), actor,
+            request, lab_id, template.id, stored, created, created + timedelta(hours=ttl), actor,
             hourly_cost=priced[0] if priced else None,
         )
 
@@ -236,7 +237,7 @@ class LabService:
 
     async def _insert(
         self, request: LabCreate, lab_id: UUID, template_id: str, values: dict[str, str],
-        expires_at: datetime, actor: str | None, hourly_cost: float | None = None,
+        created_at: datetime, expires_at: datetime, actor: str | None, hourly_cost: float | None = None,
     ) -> str:
         """Record the lab; a generated name is retried on the rare collision."""
         attempts = 1 if request.name else NAME_ATTEMPTS
@@ -245,7 +246,7 @@ class LabService:
             try:
                 await self.db.insert_lab(
                     lab_id=lab_id, name=name, template_id=template_id, owner_email=request.owner_email,
-                    inputs=values, expires_at=expires_at, actor=actor,
+                    inputs=values, created_at=created_at, expires_at=expires_at, actor=actor,
                     hourly_cost=hourly_cost, currency=self.catalog.currency if hourly_cost is not None else None,
                 )
                 return name
@@ -335,12 +336,17 @@ class LabService:
             raise LabError(409, f"access details are available once the lab is ready; it is {row['status']}")
         path = self.settings.access_secret_path.format(name=row["name"])
         try:
-            values = await self.access_store.read(path)
+            values, written = await self.access_store.read_versioned(path)
         except Exception as error:
             log.exception("reading access details of lab %s failed", lab_id)
             raise LabError(502, "could not read access details") from error
         if not values:
             raise LabError(404, "this lab published no access details")
+        # Names are reused once a lab is destroyed, and a template may leave its
+        # secret behind: never hand out details written before this lab existed.
+        if written is None or written < row["created_at"]:
+            log.warning("access details of lab %s at %s predate the lab; refusing them", lab_id, path)
+            raise LabError(404, "this lab published no access details (only an earlier lab with the same name did)")
         await self.db.add_event(lab_id, "access_viewed", caller.email, {"keys": sorted(values)})
         return row, {k: str(v) for k, v in values.items()}
 

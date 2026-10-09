@@ -105,6 +105,7 @@ def identity_from_settings(cfg: Settings) -> IdentityResolver:
         cfg.admin_emails, auditor_emails=cfg.auditor_emails, issuer=cfg.user_token_issuer,
         audience=cfg.user_token_audience,
         signing_keys=jwt.PyJWKClient(jwks_url, cache_keys=True, lifespan=600), email_claim=cfg.user_token_email_claim,
+        require_verified_email=cfg.require_verified_email,
     )
 
 
@@ -306,7 +307,8 @@ def build_app(
         async def analytics_timeseries(
             svc: Service, _: Reporter, days: Annotated[int, Query(ge=1, le=365)] = 30
         ) -> AnalyticsTimeseries:
-            return AnalyticsTimeseries(window_days=days, points=await svc.db.timeseries(now() - timedelta(days=days)))
+            moment = now()
+            return AnalyticsTimeseries(window_days=days, points=await svc.db.timeseries(moment - timedelta(days=days), moment))
 
     api = APIRouter(prefix="/v1")
     add_routes(api, current_caller, reports_caller, [Depends(authenticated)])

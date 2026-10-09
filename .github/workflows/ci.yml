@@ -6,72 +6,172 @@ on:
     tags: ["v*"]
   pull_request:
 
-permissions:
-  contents: read
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
+    name: Tests and chart lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
         env:
           POSTGRES_PASSWORD: pw
         ports: ["5432:5432"]
         options: --health-cmd pg_isready --health-interval 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.13"
-      - run: pip install -e ".[test]"
+      # Hash-checked, see requirements-test.lock; the app runs from the checkout (PYTHONPATH).
+      - run: pip install --require-hashes -r requirements-test.lock
       - run: pytest -q tests
         env:
           TEST_DATABASE_URL: postgresql://postgres:pw@localhost:5432/postgres
           PYTHONPATH: .:tests
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
       - run: |
           { echo "catalog:"; sed 's/^/  /' examples/catalog.yaml; } > /tmp/catalog-values.yaml
           helm lint charts/terrakube-selfservice -f /tmp/catalog-values.yaml \
-            --set terrakube.uiUrl=https://terrakube.example.com,terrakube.organization=example \
+            --set terrakube.uiUrl=https://terrakube.example.com,terrakube.apiUrl=https://terrakube-api.example.com,terrakube.organization=example \
             --set token.value=x,apiKeys[0]=x,database.host=db,database.password=x
+
+  security:
+    name: Security checks
+    uses: ./.github/workflows/security.yml
+    permissions:
+      actions: read # CodeQL reads the workflow run
+      contents: read
+      security-events: write # scanners upload SARIF to code scanning
 
   # main: image tagged with the commit SHA. vX.Y.Z tags: image X.Y.Z and the
   # Helm chart X.Y.Z (appVersion X.Y.Z) at oci://ghcr.io/<owner>/charts.
+  # The image is scanned before it is pushed; image and chart are signed with
+  # cosign (keyless, this workflow's identity) and get SLSA provenance, the
+  # image also an SPDX SBOM. Verification: README, "Verifying releases".
   publish:
-    needs: test
+    name: Publish, sign and attest
+    needs: [test, security]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
-      packages: write
+      packages: write # push the image and chart to ghcr.io
+      id-token: write # keyless signing and attestations
+      attestations: write # store provenance and SBOM attestations
+      security-events: write # upload the pre-push image scan
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       - id: meta
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           echo "image=ghcr.io/${owner}/terrakube-selfservice" >> "$GITHUB_OUTPUT"
-          echo "charts=oci://ghcr.io/${owner}/charts" >> "$GITHUB_OUTPUT"
+          echo "charts=ghcr.io/${owner}/charts" >> "$GITHUB_OUTPUT"
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
           fi
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+
+      # Build once into the local daemon and scan before anything is pushed.
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          load: true
+          tags: terrakube-selfservice:scan
+      - id: grype
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: terrakube-selfservice:scan
+          grype-version: v0.119.0
+          severity-cutoff: high
+          only-fixed: true
+          fail-build: true
+          output-format: sarif
+      - if: ${{ !cancelled() && steps.grype.outputs.sarif }}
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: ${{ steps.grype.outputs.sarif }}
+          category: grype-publish
+
+      # Same build (cached layers), pushed. Provenance and SBOM are attested
+      # separately below, so BuildKit adds no attestation manifests.
+      - id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           push: true
+          provenance: false
+          sbom: false
           tags: |
             ${{ steps.meta.outputs.image }}:${{ github.sha }}
             ${{ steps.meta.outputs.version && format('{0}:{1}', steps.meta.outputs.image, steps.meta.outputs.version) || '' }}
+
+      - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: ${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}
+          syft-version: v1.52.0
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-release-assets: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign the image
+        env:
+          REF: ${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "$REF"
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.meta.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.meta.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          sbom-path: sbom.spdx.json
+          push-to-registry: true
+
       - if: steps.meta.outputs.version
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
       - if: steps.meta.outputs.version
+        id: chart
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          CHARTS: ${{ steps.meta.outputs.charts }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          helm package charts/terrakube-selfservice \
-            --version "${{ steps.meta.outputs.version }}" --app-version "${{ steps.meta.outputs.version }}"
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
-          helm push terrakube-selfservice-*.tgz "${{ steps.meta.outputs.charts }}"
+          helm package charts/terrakube-selfservice --version "$VERSION" --app-version "$VERSION"
+          printf '%s' "$REGISTRY_TOKEN" | helm registry login ghcr.io -u "$REGISTRY_USER" --password-stdin
+          helm push "terrakube-selfservice-$VERSION.tgz" "oci://$CHARTS" 2>&1 | tee push.log
+          digest="$(sed -n 's/^Digest: //p' push.log)"
+          [[ "$digest" == sha256:* ]] || { echo "no digest in helm push output" >&2; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - if: steps.meta.outputs.version
+        name: Sign the chart
+        env:
+          REF: ${{ steps.meta.outputs.charts }}/terrakube-selfservice@${{ steps.chart.outputs.digest }}
+        run: cosign sign --yes "$REF"
+      - if: steps.meta.outputs.version
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.meta.outputs.charts }}/terrakube-selfservice
+          subject-digest: ${{ steps.chart.outputs.digest }}
+          push-to-registry: true

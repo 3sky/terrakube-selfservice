@@ -1,0 +1,226 @@
+name: security
+
+# Called by ci.yml on every push and pull request (publishing waits for it), and
+# run weekly so new advisories surface without a code change. Findings go to
+# the repository's Security tab (code scanning) and fail the run.
+#
+# Every action is pinned to a commit SHA and every scanner image to a digest;
+# Dependabot proposes updates. Tool versions are pinned too (no "latest").
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions: {}
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SEMGREP_IMAGE: semgrep/semgrep:1.178.0@sha256:32e459968daabe7ab86968184a29109b9564aa00392401156f9788452b42786b
+  GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+  HADOLINT_IMAGE: hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d
+  CHECKOV_IMAGE: bridgecrew/checkov:3.3.19@sha256:d3e96adafdb315ca82e792ca8708c01adae85292800fb064c8b309b3d0cb7b80
+  ACTIONLINT_IMAGE: rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+
+jobs:
+  semgrep:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to code scanning
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      # The project rules (security/semgrep) encode bugs this project has had;
+      # their tests prove each rule still catches its bug.
+      # GIT_CONFIG_*: the containers read a checkout that belongs to another user.
+      - name: Test project rules
+        run: docker run --rm -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' -v "$PWD:/src" -w /src "$SEMGREP_IMAGE" semgrep --test --metrics=off security/semgrep
+      - name: Scan
+        run: |
+          docker run --rm -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' -v "$PWD:/src" -w /src "$SEMGREP_IMAGE" semgrep scan \
+            --metrics=off --error --exclude security/semgrep \
+            --config p/python --config p/javascript --config p/dockerfile --config p/github-actions \
+            --config p/secrets --config security/semgrep/project.yml \
+            --sarif-output semgrep.sarif
+      - if: ${{ !cancelled() && !github.event.pull_request.head.repo.fork }}
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  codeql:
+    name: SAST (CodeQL, ${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read # CodeQL reads the workflow run
+      contents: read
+      security-events: write # upload SARIF to code scanning
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript, actions]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: codeql-${{ matrix.language }}
+          upload: ${{ github.event.pull_request.head.repo.fork && 'never' || 'always' }}
+
+  dependencies:
+    name: Dependencies (pip-audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266 # v1.1.0
+        with:
+          inputs: requirements.lock requirements-test.lock
+          require-hashes: true
+
+  dependency-review:
+    name: Dependency review (pull requests)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: never
+
+  secrets:
+    name: Secrets (gitleaks, full history)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to code scanning
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan
+        run: |
+          docker run --rm -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' -v "$PWD:/repo" "$GITLEAKS_IMAGE" git /repo \
+            --redact --exit-code 1 --report-format sarif --report-path /repo/gitleaks.sarif
+      - if: ${{ !cancelled() && !github.event.pull_request.head.repo.fork }}
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
+
+  workflows:
+    name: Workflows (zizmor, actionlint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to code scanning
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo "$ACTIONLINT_IMAGE" -color
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          version: 1.30.1
+          persona: regular
+          advanced-security: ${{ !github.event.pull_request.head.repo.fork }}
+
+  dockerfile:
+    name: Dockerfile (hadolint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - run: docker run --rm -i "$HADOLINT_IMAGE" hadolint --failure-threshold warning - < Dockerfile
+
+  chart:
+    name: Helm chart (Checkov)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to code scanning
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      # Every optional feature on (security/chart-scan-values.yaml); skips with
+      # their reasons are in security/checkov.yaml.
+      - name: Render
+        run: |
+          mkdir -p rendered
+          { echo "catalog:"; sed 's/^/  /' examples/catalog.yaml; } > rendered/catalog-values.yaml
+          helm template selfservice charts/terrakube-selfservice --namespace terrakube \
+            -f rendered/catalog-values.yaml -f security/chart-scan-values.yaml > rendered/chart.yaml
+      - name: Scan
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src "$CHECKOV_IMAGE" \
+            --config-file security/checkov.yaml -f rendered/chart.yaml \
+            --output cli --output sarif --output-file-path console,rendered/checkov.sarif
+      - if: ${{ !cancelled() && !github.event.pull_request.head.repo.fork }}
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: rendered/checkov.sarif
+          category: checkov
+
+  image:
+    name: Image (Grype)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to code scanning
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - run: docker build -t terrakube-selfservice:scan .
+      # Fails on high or critical vulnerabilities that have a fix available.
+      - id: grype
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: terrakube-selfservice:scan
+          grype-version: v0.119.0
+          severity-cutoff: high
+          only-fixed: true
+          fail-build: true
+          output-format: sarif
+      - if: ${{ !cancelled() && steps.grype.outputs.sarif && !github.event.pull_request.head.repo.fork }}
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: ${{ steps.grype.outputs.sarif }}
+          category: grype

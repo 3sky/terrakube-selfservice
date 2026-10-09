@@ -6,13 +6,14 @@ requires-python = ">=3.13"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
-  "fastapi==0.118.0",
+  "fastapi==0.141.1",
+  "starlette==1.7.0",
   "uvicorn==0.37.0",
   "httpx==0.28.1",
   "psycopg[binary,pool]==3.2.10",
   "pyyaml==6.0.3",
-  "pyjwt[crypto]==2.10.1",
-  "authlib==1.6.5",
+  "pyjwt[crypto]==2.15.1",
+  "authlib==1.8.0",
   "itsdangerous==2.2.0",
 ]
 
@@ -28,8 +29,8 @@ app = ["ui_static/*"]
 
 [project.optional-dependencies]
 test = [
-  "pytest==8.4.2",
-  "pytest-asyncio==1.2.0",
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
 ]
 
 [tool.pytest.ini_options]

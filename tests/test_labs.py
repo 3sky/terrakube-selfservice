@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from conftest import ADMIN, AUDITOR, BOB, CATALOG, age
@@ -6,6 +7,13 @@ from app.catalog import resolve_inputs
 
 NEW_LAB = {"template_id": "aws-lab", "name": "acme-repro", "owner_email": "alice@example.com",
            "inputs": {"customer": "acme", "secret": "s3cret"}}
+
+
+def test_resolve_inputs_rejects_non_finite_numbers():
+    template = CATALOG.get("aws-lab")
+    for value in (float("nan"), float("inf"), float("-inf")):
+        _, errors = resolve_inputs(template, {"customer": "acme", "size": value})
+        assert errors == ["size: must be a number"]
 
 
 def test_resolve_inputs_validates_and_defaults():
@@ -268,6 +276,21 @@ async def test_access_details_for_owner_once_ready(env):
     viewed = [e for e in events if e["type"] == "access_viewed"]
     assert [e["actor"] for e in viewed] == ["alice@example.com", "admin@example.com"]
     assert viewed[0]["details"] == {"keys": ["kubeconfig", "port"]}
+
+
+async def test_access_details_left_by_an_earlier_lab_are_refused(env):
+    """A destroyed lab frees its name; its template may leave the secret behind."""
+    client, service, terrakube = env
+    lab = (await client.post("/v1/labs", json={**NEW_LAB, "owner_email": "bob@example.com"}, headers=ADMIN)).json()
+    terrakube.jobs["job-1"]["status"] = "completed"
+    await service.reconcile()
+    path = "secret/data/labs/acme-repro"
+    service.access_store.secrets[path] = {"password": "bobs"}
+    service.access_store.written[path] = datetime.fromisoformat(lab["created_at"]) - timedelta(seconds=1)
+    response = await client.get(f"/v1/labs/{lab['id']}/access", headers=BOB)
+    assert response.status_code == 404 and "earlier lab" in response.json()["detail"]
+    events = (await client.get(f"/v1/labs/{lab['id']}/events", headers=BOB)).json()["items"]
+    assert not any(e["type"] == "access_viewed" for e in events)
 
 
 async def test_retry_failed_lab(env):

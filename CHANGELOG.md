@@ -2,6 +2,29 @@
 
 Image `ghcr.io/3sky/terrakube-selfservice` and chart `oci://ghcr.io/3sky/charts/terrakube-selfservice` share these versions.
 
+## Unreleased
+
+Security fixes from [SECURITY-REVIEW.md](SECURITY-REVIEW.md). Upgrades may need values changes, see **Breaking**.
+
+- Portal: the OIDC callback no longer echoes the provider's `error` parameter into the page (reflected XSS). Every `/ui` response carries a strict Content-Security-Policy (no inline script or style, no framing), `X-Frame-Options: DENY`, `nosniff` and `Referrer-Policy`.
+- Access details: a secret written before the lab was created (left behind by an earlier lab with the same name) is refused instead of handed to the new lab's owner.
+- Number inputs reject `NaN` and `Infinity`, which skipped `minimum`/`maximum` and broke cost reports.
+- Portal sessions are stored server-side (`ui_sessions` table, created on startup): signing out revokes the session, so a copied cookie stops working. Sign-out is a `POST` refused from other origins; `GET /ui/logout` only shows the button.
+- Chart `tls.secretName`: the pod serves HTTPS, so the API key and user tokens are encrypted up to the pod.
+- Dependencies: FastAPI 0.141.1 with Starlette 1.7.0 (Starlette 0.48 had six advisories, one in `StaticFiles` range requests), Authlib 1.8.0 and PyJWT 2.15.1 (both had published advisories), pytest 9.1.1. The image installs only hash-checked wheels from `requirements.lock` and copies the app instead of building it; the base image and CI actions are pinned by digest/SHA, with Dependabot proposing updates.
+- Lab creation times and report windows use the service's clock only (they mixed it with the database's).
+- CI security pipeline (`security.yml`, required before publishing): Semgrep (community rules plus tested project rules for this project's past bugs), CodeQL, pip-audit, dependency review, gitleaks, zizmor, actionlint, hadolint, Checkov on the rendered chart, Grype on the image. Findings go to code scanning.
+- Releases: the image is scanned before it is pushed; image and chart are signed with cosign (keyless) and get SLSA provenance attestations, the image an SPDX SBOM attestation. See README "Verifying releases".
+- Chart: `image.digest` pins the image; every resource sets its namespace; the service account token is only mounted when OpenBao is used; optional `networkPolicy` (ingress from listed peers, optional egress rules).
+
+**Breaking**
+
+- `terrakube.apiUrl` / `TERRAKUBE_API_URL` is required and must be `https://`, as must `openbao.addr`, the OIDC issuers and `users.token.jwksUrl`. Loopback addresses are exempt; `allowInsecureTransport: true` (`ALLOW_INSECURE_TRANSPORT`) allows plain HTTP for development. Rotate the Terrakube token if it was ever sent over HTTP.
+- `database.sslmode` defaults to `verify-full` and must be `verify-full` or `verify-ca`. Mount the server's CA with `database.caSecret`, or rely on public CAs (`sslrootcert=system`). With `existingSecret`, the service checks `DATABASE_URL` at startup.
+- Token mode needs `users.token.audience` / `USER_TOKEN_AUDIENCE`; without it, an ID token issued to any client of the issuer was accepted.
+- OIDC identities (token mode and the portal) need `email_verified: true`; an absent claim was accepted. For a provider that only issues verified addresses but omits the claim, set `users.requireVerifiedEmail: false` (`REQUIRE_VERIFIED_EMAIL=false`).
+- Portal users are signed out once on upgrade (sessions move server-side).
+
 ## 0.6.1
 
 - Sensitive form inputs (for example a personal Red Hat password) are no longer stored in the service's database: they go to the Terrakube workspace as sensitive variables only, and the lab record keeps `***`.

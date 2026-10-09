@@ -31,14 +31,17 @@ catalog:                          # your templates; see catalog.md
   templates: [...]
 apiKeys: ["<random key for the portal>"]
 database:
-  host: postgres.example.com
+  host: postgres.example.com      # must match the server certificate (sslmode verify-full)
   password: "<password>"
+  caSecret:
+    name: postgres-ca             # omit to trust public CAs
 terrakube:
+  apiUrl: https://terrakube-api.example.com
   uiUrl: https://terrakube.example.com
   organization: my-org
   vcsId: "<VCS connection id>"    # for private template repositories
 openbao:
-  addr: http://openbao.openbao.svc:8200
+  addr: https://openbao.openbao.svc:8200
 users:
   adminEmails: [admin@example.com]
 ```
@@ -52,9 +55,11 @@ The chart refuses to install when the catalog is invalid, no Terrakube token sou
 | `catalog` | none | The templates ([catalog reference](catalog.md)); validated at install time |
 | `existingCatalogConfigMap` | `""` | Use a ConfigMap with a `catalog.yaml` key instead |
 | `apiKeys` | none | Bearer keys for portals; several allow rotation |
-| `database.*` | | PostgreSQL connection (`host`, `port`, `name`, `user`, `password`, `sslmode`) |
+| `database.*` | | PostgreSQL connection (`host`, `port`, `name`, `user`, `password`) |
+| `database.sslmode` | `verify-full` | `verify-full` or `verify-ca`; weaker modes need `allowInsecureTransport` |
+| `database.caSecret.name`, `.key` | `""`, `ca.crt` | Secret with the database server's CA; without it, public CAs (`sslrootcert=system`) |
 | `existingSecret` | `""` | A Secret with `API_KEYS` and `DATABASE_URL` instead of the two above |
-| `terrakube.apiUrl` | in-cluster Terrakube API | Terrakube API base URL |
+| `terrakube.apiUrl` | required | Terrakube API base URL, `https://` |
 | `terrakube.uiUrl` | required | Used for `workspace_url` links |
 | `terrakube.organization` | required | Organization for lab workspaces |
 | `terrakube.vcsId` | `""` | VCS connection for private template repositories |
@@ -62,17 +67,22 @@ The chart refuses to install when the catalog is invalid, no Terrakube token sou
 | `terrakube.project` | `Self-service` | Project for lab workspaces, created if missing; `""` for none |
 | `terrakube.tags` | `true` | Tag workspaces with `lab_owner:` and `expires_at:` |
 | `token.*` | | Where the Terrakube token comes from ([below](#the-terrakube-token)) |
-| `openbao.addr`, `openbao.role` | `""`, `terrakube-selfservice` | OpenBao/Vault with Kubernetes auth; enables the access endpoint |
+| `openbao.addr`, `openbao.role` | `""`, `terrakube-selfservice` | OpenBao/Vault (`https://`) with Kubernetes auth; enables the access endpoint |
 | `access.secretPath` | `secret/data/labs/{name}` | Where templates publish access details |
 | `users.adminEmails` | `[]` | Admins: act on any lab, plus everything auditors can |
 | `users.auditorEmails` | `[]` | Auditors: view every lab and the reports, act only on their own labs |
 | `users.token.*` | | Token mode ([below](#users)) |
+| `users.requireVerifiedEmail` | `true` | OIDC identities (token mode, portal) need `email_verified: true`; `false` only for providers that omit the claim |
 | `serviceAccount.name` | `terrakube-selfservice` | Service account bound in OpenBao/Vault |
+| `allowInsecureTransport` | `false` | Development only: allow `http://` Terrakube, OpenBao and OIDC URLs and unverified database TLS |
 | `reconcileIntervalSeconds` | `30` | How often labs are checked and expired |
 | `deleteWorkspaceAfterDestroy` | `true` | Remove the workspace after a successful destroy |
 | `ui.enabled`, `ui.publicUrl`, `ui.title` | `false` | The [web portal](#web-portal) and the address users open |
 | `ui.oidc.issuer`, `clientId`, `clientSecret`, `scopes` | | Portal sign-in |
 | `ui.sessionSecret`, `ui.sessionMaxAgeHours` | , `8` | Session cookie signing key (32+ characters) and lifetime |
+| `image.digest` | `""` | `sha256:...`: deploy exactly this (cosign-verified) image; overrides `image.tag` ([verifying releases](../README.md#verifying-releases)) |
+| `networkPolicy.enabled`, `ingressFrom`, `egress` | `false`, `[]`, `[]` | NetworkPolicy: only `ingressFrom` peers (gateway, portal backend) reach the pod; `egress` rules optional |
+| `tls.secretName` | `""` | A `kubernetes.io/tls` Secret: the pod serves HTTPS on 8080 (probes follow); with `route.*`, add a BackendTLSPolicy |
 | `route.*` | disabled | Publish through a Gateway API `HTTPRoute`: `pathPrefix` is rewritten to `rewritePrefix` (`/` for the API, `/ui` for the portal only); otherwise cluster-internal |
 
 ## The Terrakube token
@@ -89,7 +99,7 @@ Personal access tokens expire (Terrakube asks for a lifetime in days); plan the 
 
 Every lab request identifies an end user. Pick the mode that matches the portal ([details](portal-integration.md#2-identify-the-user-on-every-call)):
 
-- **Token mode (recommended):** set `users.token.issuer` and `users.token.audience` to the OIDC provider and client the portal signs users in with. The service verifies the ID token in `X-User-Token` against the issuer's signing keys (from its discovery document, or `users.token.jwksUrl`) and uses the `email` claim (`users.token.emailClaim`).
+- **Token mode (recommended):** set `users.token.issuer` and `users.token.audience` (both required) to the OIDC provider and client the portal signs users in with. The service verifies the ID token in `X-User-Token` against the issuer's signing keys (from its discovery document, or `users.token.jwksUrl`) and uses the `email` claim (`users.token.emailClaim`).
 - **Header mode (default):** the service trusts `X-Actor-Email` from the portal backend. Only safe when the portal sets it from its own session.
 
 Roles, cumulative: everyone who signs in is a **user** (own labs only); **auditors** (`users.auditorEmails`) also see every lab, its history and cost, and the reports; **admins** (`users.adminEmails`) also act on any lab and read its access details. See the [role table](../README.md#roles).
@@ -139,7 +149,8 @@ route:
 ```
 
 - Users sign in with the provider; the portal needs their `email` claim. Admins are `users.adminEmails`, as for the API.
-- Sessions are signed cookies (`SameSite=Lax`, `Secure`, scoped to the portal path) that expire after `ui.sessionMaxAgeHours`. The portal's API calls also need an `X-Requested-With` header, so other sites cannot act with a user's session.
+- Sessions are signed cookies (`SameSite=Lax`, `Secure`, scoped to the portal path) holding a random id that is checked against the `ui_sessions` table; they expire after `ui.sessionMaxAgeHours`, and signing out (a `POST`, refused from other origins) deletes the session server-side, so a copied cookie stops working. The portal's API calls also need an `X-Requested-With` header, so other sites cannot act with a user's session.
+- Every `/ui` response carries a strict Content-Security-Policy and refuses framing.
 - The portal uses no API key: it calls the service in-process. `/v1` keeps working unchanged for other tools.
 
 ## What it does in Terrakube
@@ -172,10 +183,10 @@ For running the image without the chart:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATABASE_URL` | required | PostgreSQL URL |
+| `DATABASE_URL` | required | PostgreSQL URL; `sslmode=verify-full` or `verify-ca` unless the host is loopback |
 | `API_KEYS` | required | Comma-separated portal keys |
 | `CATALOG_PATH` | `/etc/terrakube-selfservice/catalog.yaml` | Catalog file |
-| `TERRAKUBE_API_URL` | in-cluster Terrakube API | Terrakube API |
+| `TERRAKUBE_API_URL` | required | Terrakube API, `https://` |
 | `TERRAKUBE_UI_URL` | required | Terrakube UI, for links |
 | `TERRAKUBE_ORGANIZATION` | required | Organization for labs |
 | `TERRAKUBE_VCS_ID` | | VCS connection for private templates |
@@ -187,7 +198,10 @@ For running the image without the chart:
 | `OPENBAO_SECRET_PATH`, `OPENBAO_SECRET_KEY` | `secret/data/terrakube-selfservice`, `terrakube_token` | Token in OpenBao |
 | `ACCESS_SECRET_PATH` | `secret/data/labs/{name}` | Access details path |
 | `ADMIN_EMAILS`, `AUDITOR_EMAILS` | | Comma-separated admins and auditors |
-| `USER_TOKEN_ISSUER`, `USER_TOKEN_AUDIENCE`, `USER_TOKEN_JWKS_URL`, `USER_TOKEN_EMAIL_CLAIM` | , , discovery, `email` | Token mode |
+| `USER_TOKEN_ISSUER`, `USER_TOKEN_AUDIENCE`, `USER_TOKEN_JWKS_URL`, `USER_TOKEN_EMAIL_CLAIM` | , , discovery, `email` | Token mode; the audience is required with an issuer |
+| `REQUIRE_VERIFIED_EMAIL` | `true` | Reject OIDC identities without `email_verified: true` |
+| `UVICORN_SSL_CERTFILE`, `UVICORN_SSL_KEYFILE` | | Serve HTTPS (the chart's `tls.secretName` sets them) |
+| `ALLOW_INSECURE_TRANSPORT` | `false` | Development only: allow `http://` (Terrakube, OpenBao, OIDC issuers, JWKS) and unverified database TLS; loopback is always allowed |
 | `RECONCILE_INTERVAL_SECONDS` | `30` | Loop interval |
 | `PENDING_TIMEOUT_MINUTES` | `10` | When a stuck `pending` lab is marked failed |
 | `DELETE_WORKSPACE_AFTER_DESTROY` | `true` | Remove workspaces after destroy |

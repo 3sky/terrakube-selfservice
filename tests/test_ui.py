@@ -1,3 +1,9 @@
+import base64
+import hashlib
+import json
+from datetime import UTC, datetime, timedelta
+
+import itsdangerous
 import pytest_asyncio
 from conftest import ADMIN, CATALOG, FakeAccessStore, FakeTerrakube, settings
 from httpx import ASGITransport, AsyncClient
@@ -109,3 +115,68 @@ async def test_ui_auditor_role(portal, database):
             assert (await auditor.get(f"/ui/api/labs/{lab['id']}", headers=PORTAL)).status_code == 200
             assert (await auditor.get("/ui/api/analytics/costs", headers=PORTAL)).status_code == 200
             assert (await auditor.post(f"/ui/api/labs/{lab['id']}/destroy", headers=PORTAL)).status_code == 403
+
+
+async def test_sign_in_error_is_not_reflected(database):
+    app, _ = await client_for(database, ui_settings(
+        public_url="https://lab.example.com/portal", oidc_issuer="https://sso.example.com", dev_user_email=None))
+    payload = "<img src=x onerror=alert(document.domain)>"
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            page = await client.get("/ui/auth/callback", params={"error": payload, "error_description": payload})
+    assert page.status_code == 401
+    assert "onerror" not in page.text and "<img" not in page.text
+    assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
+
+
+async def test_portal_security_headers(portal):
+    client, _ = portal
+    for path in ("/ui/", "/ui/static/app.js", "/ui/api/me"):
+        response = await client.get(path, headers=PORTAL)
+        csp = response.headers["content-security-policy"]
+        assert "script-src 'self'" in csp and "unsafe-inline" not in csp, path
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["x-frame-options"] == "DENY"
+    # /v1 and health checks are left alone.
+    assert "content-security-policy" not in (await client.get("/healthz")).headers
+
+
+def session_cookie(secret: str, session: dict) -> str:
+    """A cookie as Starlette's SessionMiddleware signs it."""
+    data = base64.b64encode(json.dumps(session).encode())
+    return itsdangerous.TimestampSigner(secret).sign(data).decode()
+
+
+async def test_signed_in_session_is_revoked_on_sign_out(database):
+    cfg = ui_settings(public_url="https://lab.example.com/ui", oidc_issuer="https://sso.example.com", dev_user_email=None)
+    app, service = await client_for(database, cfg)
+    sid = "test-session-id"
+    created = datetime.now(UTC)
+    await service.db.create_session(hashlib.sha256(sid.encode()).hexdigest(), "bob@example.com",
+                                    created, created + timedelta(hours=1))
+    cookie = {"Cookie": f"selfservice_session={session_cookie(cfg.session_secret, {'sid': sid})}"}
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="https://lab.example.com") as client:
+            assert (await client.get("/ui/api/me", headers={**PORTAL, **cookie})).json()["email"] == "bob@example.com"
+            # GET and cross-site POST do not sign out.
+            assert (await client.get("/ui/logout", headers=cookie)).status_code == 200
+            evil = await client.post("/ui/logout", headers={**cookie, "Origin": "https://evil.example.com"})
+            assert evil.status_code == 403
+            assert (await client.get("/ui/api/me", headers={**PORTAL, **cookie})).status_code == 200
+
+            out = await client.post("/ui/logout", headers={**cookie, "Origin": "https://lab.example.com"})
+            assert out.status_code == 200 and "Signed out" in out.text
+            # The old cookie, replayed, no longer works.
+            assert (await client.get("/ui/api/me", headers={**PORTAL, **cookie})).status_code == 401
+            assert (await client.get("/ui/", headers=cookie, follow_redirects=False)).status_code == 307
+
+
+async def test_expired_session_is_refused(database):
+    cfg = ui_settings(oidc_issuer="https://sso.example.com", dev_user_email=None)
+    app, service = await client_for(database, cfg)
+    created = datetime.now(UTC) - timedelta(hours=9)
+    await service.db.create_session(hashlib.sha256(b"old").hexdigest(), "bob@example.com", created, created + timedelta(hours=8))
+    cookie = {"Cookie": f"selfservice_session={session_cookie(cfg.session_secret, {'sid': 'old'})}"}
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            assert (await client.get("/ui/api/me", headers={**PORTAL, **cookie})).status_code == 401

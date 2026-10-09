@@ -44,6 +44,16 @@ CREATE INDEX IF NOT EXISTS lab_events_type_at ON lab_events (type, at);
 -- 0.3.0: hourly cost estimate, snapshotted when the lab is created.
 ALTER TABLE labs ADD COLUMN IF NOT EXISTS hourly_cost double precision;
 ALTER TABLE labs ADD COLUMN IF NOT EXISTS currency text;
+
+-- Portal sign-ins. The cookie holds a random id; only its SHA-256 is stored,
+-- and signing out deletes the row, so a copied cookie stops working.
+CREATE TABLE IF NOT EXISTS ui_sessions (
+    id         text PRIMARY KEY,
+    email      text NOT NULL,
+    created_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ui_sessions_expires_at ON ui_sessions (expires_at);
 """
 
 # Only one replica runs the reconciler at a time.
@@ -78,23 +88,24 @@ class Database:
 
     async def insert_lab(
         self, *, lab_id: UUID, name: str, template_id: str, owner_email: str,
-        inputs: dict[str, str], expires_at: datetime, actor: str | None,
+        inputs: dict[str, str], created_at: datetime, expires_at: datetime, actor: str | None,
         hourly_cost: float | None = None, currency: str | None = None,
     ) -> dict[str, Any]:
+        """created_at comes from the service's clock, like every other lab timestamp."""
         from psycopg.errors import UniqueViolation
 
         try:
             async with self.pool.connection() as conn, conn.transaction():
                 row = await (await conn.execute(
                     """
-                    INSERT INTO labs (id, name, template_id, owner_email, inputs, status, expires_at,
+                    INSERT INTO labs (id, name, template_id, owner_email, inputs, status, created_at, expires_at,
                                       hourly_cost, currency)
-                    VALUES (%(id)s, %(name)s, %(template_id)s, %(owner)s, %(inputs)s, 'pending', %(expires_at)s,
-                            %(hourly_cost)s, %(currency)s)
+                    VALUES (%(id)s, %(name)s, %(template_id)s, %(owner)s, %(inputs)s, 'pending', %(created_at)s,
+                            %(expires_at)s, %(hourly_cost)s, %(currency)s)
                     RETURNING *
                     """,
                     {"id": lab_id, "name": name, "template_id": template_id, "owner": owner_email,
-                     "inputs": Jsonb(inputs), "expires_at": expires_at, "hourly_cost": hourly_cost,
+                     "inputs": Jsonb(inputs), "created_at": created_at, "expires_at": expires_at, "hourly_cost": hourly_cost,
                      "currency": currency},
                 )).fetchone()
                 await conn.execute(
@@ -237,18 +248,18 @@ class Database:
             **counts, "templates": templates, "top_owners": owners,
         }
 
-    async def timeseries(self, since: datetime) -> list[dict[str, Any]]:
+    async def timeseries(self, since: datetime, now: datetime) -> list[dict[str, Any]]:
         return await self._all(
             """
             SELECT d::date AS day,
               count(e.*) FILTER (WHERE e.type = 'created')   AS created,
               count(e.*) FILTER (WHERE e.type = 'destroyed') AS destroyed,
               count(e.*) FILTER (WHERE e.type = 'expired')   AS expired
-            FROM generate_series(date_trunc('day', %(since)s::timestamptz), date_trunc('day', now()), interval '1 day') d
+            FROM generate_series(date_trunc('day', %(since)s::timestamptz), date_trunc('day', %(now)s::timestamptz), interval '1 day') d
             LEFT JOIN lab_events e ON date_trunc('day', e.at) = d
             GROUP BY d ORDER BY d
             """,
-            {"since": since},
+            {"since": since, "now": now},
         )
 
     async def unpriced_labs(self) -> list[dict[str, Any]]:
@@ -261,7 +272,7 @@ class Database:
                 (hourly_cost, currency, lab_id),
             )
 
-    async def cost_lines(self, since: datetime) -> list[dict[str, Any]]:
+    async def cost_lines(self, since: datetime, now: datetime) -> list[dict[str, Any]]:
         """Per owner and template: labs, hours inside the window, and estimated cost.
 
         Hours run from creation to destruction (or now), clipped to the window.
@@ -272,10 +283,10 @@ class Database:
             WITH clipped AS (
               SELECT owner_email, template_id, hourly_cost, ready_at IS NOT NULL AS charged,
                 GREATEST(0, EXTRACT(EPOCH FROM
-                  LEAST(COALESCE(destroyed_at, now()), now()) - GREATEST(created_at, %(since)s)
+                  LEAST(COALESCE(destroyed_at, %(now)s), %(now)s) - GREATEST(created_at, %(since)s)
                 ) / 3600) AS hours
               FROM labs
-              WHERE COALESCE(destroyed_at, now()) >= %(since)s
+              WHERE COALESCE(destroyed_at, %(now)s) >= %(since)s
             )
             SELECT owner_email, template_id,
               count(*)::int                                                                  AS labs,
@@ -287,8 +298,28 @@ class Database:
             GROUP BY owner_email, template_id
             ORDER BY estimated_cost DESC, lab_hours DESC, owner_email, template_id
             """,
-            {"since": since},
+            {"since": since, "now": now},
         )
+
+    # --- portal sessions -----------------------------------------------------
+
+    async def create_session(self, session_hash: str, email: str, created_at: datetime, expires_at: datetime) -> None:
+        async with self.pool.connection() as conn, conn.transaction():
+            await conn.execute("DELETE FROM ui_sessions WHERE expires_at <= %s", (created_at,))
+            await conn.execute(
+                "INSERT INTO ui_sessions (id, email, created_at, expires_at) VALUES (%s, %s, %s, %s)",
+                (session_hash, email, created_at, expires_at),
+            )
+
+    async def session_email(self, session_hash: str, now: datetime) -> str | None:
+        row = await self._one(
+            "SELECT email FROM ui_sessions WHERE id = %(id)s AND expires_at > %(now)s", {"id": session_hash, "now": now}
+        )
+        return row["email"] if row else None
+
+    async def delete_session(self, session_hash: str) -> None:
+        async with self.pool.connection() as conn:
+            await conn.execute("DELETE FROM ui_sessions WHERE id = %s", (session_hash,))
 
     async def try_reconciler_lock(self, conn) -> bool:
         row = await (await conn.execute("SELECT pg_try_advisory_lock(%s) AS locked", (RECONCILER_LOCK_ID,))).fetchone()

@@ -1,5 +1,5 @@
 import os
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -24,11 +24,14 @@ AUDITOR = {"X-Actor-Email": "auditor@example.com"}
 class FakeAccessStore:
     def __init__(self):
         self.secrets: dict[str, dict] = {}
+        # When each secret was written; unset means just now.
+        self.written: dict[str, datetime] = {}
         self.reads: list[str] = []
 
-    async def read(self, path: str):
+    async def read_versioned(self, path: str):
         self.reads.append(path)
-        return self.secrets.get(path)
+        value = self.secrets.get(path)
+        return value, (self.written.get(path, datetime.now(UTC)) if value is not None else None)
 
 
 class FakeTerrakube:

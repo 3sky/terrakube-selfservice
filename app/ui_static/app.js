@@ -169,7 +169,7 @@ async function newLabView(templateId) {
     }
   });
   crumbs(["New lab", "#/catalog"], [t.name]);
-  show(h("h1", {}, `New lab: ${t.name}`), h("p", { class: "subtitle" }, t.description || ""), h("div", { style: "height:16px" }), form);
+  show(h("h1", {}, `New lab: ${t.name}`), h("p", { class: "subtitle" }, t.description || ""), h("div", { class: "spacer" }), form);
   refreshEstimate();
 }
 

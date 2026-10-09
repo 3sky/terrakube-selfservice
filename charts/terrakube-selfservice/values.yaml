@@ -2,6 +2,9 @@ image:
   repository: ghcr.io/3sky/terrakube-selfservice
   # Defaults to the chart's appVersion.
   tag: ""
+  # sha256:... pins the exact (cosign-signed) image and overrides tag; see the
+  # README for verifying a release's signature and digest.
+  digest: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
@@ -22,14 +25,22 @@ database:
   name: terrakube_selfservice
   user: terrakube_selfservice
   password: ""
-  sslmode: require
+  # verify-full checks the server certificate and host name. Weaker modes
+  # (require, prefer, ...) need allowInsecureTransport.
+  sslmode: verify-full
+  # CA for verify-ca/verify-full: a Secret holding the server's CA certificate,
+  # or "system" trust (public CAs) when no Secret is given.
+  caSecret:
+    name: ""
+    key: ca.crt
 # Or an existing Secret with API_KEYS (comma-separated) and DATABASE_URL keys;
 # apiKeys and database are then ignored.
 existingSecret: ""
 
 # --- Terrakube -----------------------------------------------------------------
 terrakube:
-  apiUrl: http://terrakube-api-service.terrakube.svc.cluster.local:8080
+  # Terrakube API base URL. Required; https:// (the token is sent with every call).
+  apiUrl: ""
   # Public UI URL, used for workspace links. Required.
   uiUrl: ""
   # Organization that owns the lab workspaces. Required.
@@ -48,6 +59,7 @@ terrakube:
 # Kubernetes auth with serviceAccount.name. Used for the access endpoint and,
 # unless token.existingSecret or token.value is set, for the Terrakube token.
 openbao:
+  # https:// (the service account token and OpenBao token are sent to it).
   addr: ""
   role: terrakube-selfservice
 
@@ -74,10 +86,15 @@ users:
   # Admins also act on any lab and read its access details.
   adminEmails: []
   auditorEmails: []
+  # Roles follow the email address, so OIDC identities (token mode and the
+  # portal) need email_verified: true. Set false only for a provider that
+  # issues verified addresses without that claim.
+  requireVerifiedEmail: true
   # Token mode: identify users by their OIDC ID token (X-User-Token) instead of
   # the X-Actor-Email header set by the portal backend. Recommended.
   token:
     issuer: ""
+    # Client id the ID tokens are issued to. Required with issuer.
     audience: ""
     # Defaults to the issuer's discovery document.
     jwksUrl: ""
@@ -87,6 +104,10 @@ users:
 access:
   # kv-v2 path where templates publish each lab's access details; {name} is the lab name.
   secretPath: secret/data/labs/{name}
+
+# Development only: allow http:// for Terrakube, OpenBao and OIDC issuers and
+# database sslmode weaker than verify-ca. Credentials then travel unprotected.
+allowInsecureTransport: false
 
 reconcileIntervalSeconds: 30
 deleteWorkspaceAfterDestroy: true
@@ -114,6 +135,13 @@ ui:
   sessionSecret: ""
   sessionMaxAgeHours: 8
 
+# Serve HTTPS on port 8080 with a kubernetes.io/tls Secret (for example from
+# cert-manager). Requests carry the API key and user tokens, so encrypt the hop
+# from the portal backend or gateway to the pod. With route.enabled, the
+# gateway needs a BackendTLSPolicy for this service.
+tls:
+  secretName: ""
+
 # Optional Gateway API route. pathPrefix is replaced by rewritePrefix before
 # the service: "/" publishes the API (/selfservice/v1/...), "/ui" only the portal.
 route:
@@ -122,6 +150,16 @@ route:
   pathPrefix: /selfservice
   rewritePrefix: /
   parentRefs: []
+
+# Restrict which pods may reach the service (the portal backend, the gateway).
+# ingressFrom: NetworkPolicy peers, e.g.
+#   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: gateway}}
+# egress: optional NetworkPolicy egress rules; empty leaves egress open (the
+# service needs DNS, PostgreSQL, Terrakube, OpenBao and the OIDC issuer).
+networkPolicy:
+  enabled: false
+  ingressFrom: []
+  egress: []
 
 resources:
   requests:

@@ -3,12 +3,14 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  namespace: {{ .Release.Namespace }}
   name: {{ .Values.serviceAccount.name }}
 {{- if not .Values.existingSecret }}
 ---
 apiVersion: v1
 kind: Secret
 metadata:
+  namespace: {{ .Release.Namespace }}
   name: {{ $name }}
 type: Opaque
 stringData:
@@ -18,7 +20,11 @@ stringData:
   UI_SESSION_SECRET: {{ .Values.ui.sessionSecret | quote }}
   {{- end }}
   {{- with .Values.database }}
-  DATABASE_URL: {{ printf "postgresql://%s:%s@%s:%v/%s?sslmode=%s" .user (required "database.password is required" .password) (required "database.host is required" .host) .port .name .sslmode | quote }}
+  {{- $url := printf "postgresql://%s:%s@%s:%v/%s?sslmode=%s" .user (required "database.password is required" .password) (required "database.host is required" .host) .port .name .sslmode }}
+  {{- if hasPrefix "verify-" .sslmode }}
+  {{- $url = printf "%s&sslrootcert=%s" $url (ternary "/etc/terrakube-selfservice-db/ca.crt" "system" (ne .caSecret.name "")) }}
+  {{- end }}
+  DATABASE_URL: {{ $url | quote }}
   {{- end }}
   {{- with .Values.token.value }}
   TERRAKUBE_TOKEN: {{ . | quote }}
@@ -29,6 +35,7 @@ stringData:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  namespace: {{ .Release.Namespace }}
   name: {{ include "tss.catalogConfigMap" . }}
 data:
   catalog.yaml: |
@@ -38,10 +45,15 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  namespace: {{ .Release.Namespace }}
   name: {{ $name }}
   labels:
     app.kubernetes.io/name: terrakube-selfservice
     app.kubernetes.io/instance: {{ .Release.Name }}
+  {{- if include "tss.openbaoAddr" . }}
+  annotations:
+    checkov.io/skip1: CKV_K8S_38=Service account token is needed for OpenBao Kubernetes auth
+  {{- end }}
 spec:
   # The reconciler is guarded by a PostgreSQL advisory lock; one replica is
   # enough for most installations.
@@ -60,6 +72,8 @@ spec:
         checksum/config: {{ printf "%s|%s|%s|%s|%s" (toJson .Values.catalog) (toJson .Values.apiKeys) (toJson .Values.database) .Values.token.value (toJson .Values.ui) | sha256sum }}
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      # The token is only needed for OpenBao Kubernetes auth.
+      automountServiceAccountToken: {{ ne (include "tss.openbaoAddr" .) "" }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -71,7 +85,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: app
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "tss.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
@@ -118,6 +132,8 @@ spec:
               value: {{ join "," .Values.users.adminEmails | quote }}
             - name: AUDITOR_EMAILS
               value: {{ join "," .Values.users.auditorEmails | quote }}
+            - name: REQUIRE_VERIFIED_EMAIL
+              value: {{ .Values.users.requireVerifiedEmail | quote }}
             {{- with .Values.users.token }}
             {{- if .issuer }}
             - name: USER_TOKEN_ISSUER
@@ -146,6 +162,14 @@ spec:
             - name: UI_SESSION_MAX_AGE_HOURS
               value: {{ .Values.ui.sessionMaxAgeHours | quote }}
             {{- end }}
+            {{- if .Values.tls.secretName }}
+            - name: UVICORN_SSL_CERTFILE
+              value: /etc/terrakube-selfservice-tls/tls.crt
+            - name: UVICORN_SSL_KEYFILE
+              value: /etc/terrakube-selfservice-tls/tls.key
+            {{- end }}
+            - name: ALLOW_INSECURE_TRANSPORT
+              value: {{ .Values.allowInsecureTransport | quote }}
             - name: RECONCILE_INTERVAL_SECONDS
               value: {{ .Values.reconcileIntervalSeconds | quote }}
             - name: DELETE_WORKSPACE_AFTER_DESTROY
@@ -154,11 +178,13 @@ spec:
             httpGet:
               path: /healthz
               port: http
+              scheme: {{ ternary "HTTPS" "HTTP" (ne .Values.tls.secretName "") }}
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
+              scheme: {{ ternary "HTTPS" "HTTP" (ne .Values.tls.secretName "") }}
             periodSeconds: 30
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
@@ -174,6 +200,16 @@ spec:
             {{- if .Values.token.existingSecret.name }}
             - name: token
               mountPath: /var/run/terrakube-selfservice
+              readOnly: true
+            {{- end }}
+            {{- if .Values.tls.secretName }}
+            - name: tls
+              mountPath: /etc/terrakube-selfservice-tls
+              readOnly: true
+            {{- end }}
+            {{- if .Values.database.caSecret.name }}
+            - name: db-ca
+              mountPath: /etc/terrakube-selfservice-db
               readOnly: true
             {{- end }}
             - name: tmp
@@ -192,12 +228,28 @@ spec:
                 path: token
         {{- end }}
         {{- end }}
+        {{- with .Values.tls.secretName }}
+        - name: tls
+          secret:
+            secretName: {{ . }}
+        {{- end }}
+        {{- with .Values.database.caSecret }}
+        {{- if .name }}
+        - name: db-ca
+          secret:
+            secretName: {{ .name }}
+            items:
+              - key: {{ .key }}
+                path: ca.crt
+        {{- end }}
+        {{- end }}
         - name: tmp
           emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
 metadata:
+  namespace: {{ .Release.Namespace }}
   name: {{ $name }}
 spec:
   selector:
@@ -207,11 +259,15 @@ spec:
     - name: http
       port: 8080
       targetPort: http
+      {{- if .Values.tls.secretName }}
+      appProtocol: https
+      {{- end }}
 {{- if .Values.route.enabled }}
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
+  namespace: {{ .Release.Namespace }}
   name: {{ $name }}
 spec:
   parentRefs:
@@ -234,4 +290,30 @@ spec:
       backendRefs:
         - name: {{ $name }}
           port: 8080
+{{- end }}
+{{- with .Values.networkPolicy }}
+{{- if .enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  namespace: {{ $.Release.Namespace }}
+  name: {{ $name }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: terrakube-selfservice
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+  policyTypes: [Ingress{{ if .egress }}, Egress{{ end }}]
+  ingress:
+    - from:
+        {{- required "networkPolicy.ingressFrom is required when networkPolicy.enabled" .ingressFrom | toYaml | nindent 8 }}
+      ports:
+        - port: 8080
+          protocol: TCP
+  {{- with .egress }}
+  egress:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
 {{- end }}

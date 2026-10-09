@@ -1,3 +1,4 @@
+import math
 import re
 from pathlib import Path
 
@@ -115,7 +116,7 @@ def resolve_inputs(template: TemplateSpec, raw: dict[str, InputValue]) -> tuple[
                     errors.append(f"{spec.name}: must be a boolean")
                     continue
             case InputType.number:
-                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                     errors.append(f"{spec.name}: must be a number")
                     continue
                 if spec.minimum is not None and value < spec.minimum:

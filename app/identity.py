@@ -24,6 +24,22 @@ class IdentityError(Exception):
     pass
 
 
+def verified_email(claims: dict, email_claim: str = "email", require_verified: bool = True) -> str:
+    """The lowercased email from OIDC claims, or IdentityError.
+
+    Roles are granted by email, so an address the provider has not verified
+    could claim an admin's. By default `email_verified` must be true; providers
+    that only issue verified addresses but omit the claim need require_verified=False.
+    """
+    email = str(claims.get(email_claim) or "").strip().lower()
+    if not email or "@" not in email:
+        raise IdentityError(f"token has no {email_claim} claim")
+    verified = claims.get("email_verified")
+    if verified is False or (require_verified and verified is not True):
+        raise IdentityError("email address is not verified")
+    return email
+
+
 ROLES = ("user", "auditor", "admin")
 
 
@@ -56,11 +72,13 @@ class IdentityResolver:
     def __init__(
         self, admin_emails: tuple[str, ...], *, auditor_emails: tuple[str, ...] = (), issuer: str | None = None,
         audience: str | None = None, signing_keys: SigningKeys | None = None, email_claim: str = "email",
+        require_verified_email: bool = True,
     ):
         self.admin_emails = {e.lower() for e in admin_emails}
         self.auditor_emails = {e.lower() for e in auditor_emails}
         self.token_mode = issuer is not None
         self._issuer, self._audience, self._keys, self._email_claim = issuer, audience, signing_keys, email_claim
+        self._require_verified = require_verified_email
 
     async def resolve(self, actor_email: str | None, user_token: str | None) -> Caller:
         email = await self._from_token(user_token) if self.token_mode else (actor_email or "").strip()
@@ -85,9 +103,7 @@ class IdentityResolver:
             )
         except Exception as error:
             raise IdentityError(f"invalid user token: {error}") from None
-        if claims.get("email_verified") is False:
-            raise IdentityError("user token email is not verified")
-        return str(claims.get(self._email_claim) or "")
+        return verified_email(claims, self._email_claim, self._require_verified)
 
 
 def discover_jwks_url(issuer: str) -> str:
