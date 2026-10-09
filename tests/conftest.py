@@ -45,6 +45,7 @@ class FakeTerrakube:
         self.tags: dict[str, dict[str, str]] = {}
         self.released: list[tuple[str, list[str]]] = []
         self.deleted_outside: set[str] = set()
+        self.vcs: dict[str, str] = {"GitHub Akamai": "vcs-akamai"}
 
     async def create_workspace(self, **kwargs) -> str:
         if self.fail_create:
@@ -69,6 +70,12 @@ class FakeTerrakube:
 
     async def project_id(self, name) -> str:
         return self.projects.setdefault(name, f"prj-{len(self.projects) + 1}")
+
+    async def vcs_id(self, name) -> str:
+        if name not in self.vcs:
+            from app.terrakube import TerrakubeError
+            raise TerrakubeError(f"VCS connection {name!r} not found")
+        return self.vcs[name]
 
     async def set_workspace_tags(self, workspace_id, tags) -> None:
         if self.fail_tags:

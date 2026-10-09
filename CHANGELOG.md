@@ -2,7 +2,20 @@
 
 Image `ghcr.io/3sky/terrakube-selfservice` and chart `oci://ghcr.io/3sky/charts/terrakube-selfservice` share these versions.
 
-## Unreleased
+## 0.7.2
+
+Makes 0.7.0's transport checks usable with in-cluster services and private CAs, without turning them all off.
+
+- `insecureHttpHosts` (`INSECURE_HTTP_HOSTS`): plain HTTP to the listed hosts only, for in-cluster Terrakube and OpenBao without TLS. Unlike `allowInsecureTransport`, it leaves every other check, database TLS included, in force.
+- `caBundle.pem` / `caBundle.configMap` (`CA_BUNDLE_FILE`): extra CA certificates trusted for HTTPS to Terrakube, OpenBao and the OIDC provider (portal and token mode), for servers with a private CA.
+- `database.caCert`: the database server's CA as PEM, for managed databases with a private project CA, without creating a Secret.
+- `terrakube.vcsName` (`TERRAKUBE_VCS_NAME`): select the VCS connection by its name in Terrakube instead of its id. A name that does not exist fails the lab with a clear message.
+
+## 0.7.1
+
+- Dependency updates for CI actions (Dependabot); no changes to the service or chart.
+
+## 0.7.0
 
 Security fixes from [SECURITY-REVIEW.md](SECURITY-REVIEW.md). Upgrades may need values changes, see **Breaking**.
 

@@ -1,4 +1,5 @@
 import os
+import ssl
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -14,13 +15,35 @@ def _bool(value: str | None, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def require_tls(name: str, url: str, allow_insecure: bool) -> None:
-    """Credentials and identity keys only travel over HTTPS, except to loopback
-    or with ALLOW_INSECURE_TRANSPORT=true (development)."""
+def _list(value: str | None) -> tuple[str, ...]:
+    return tuple(v.strip().lower() for v in (value or "").split(",") if v.strip())
+
+
+def require_tls(name: str, url: str, allow_insecure: bool, http_hosts: tuple[str, ...] = ()) -> None:
+    """Credentials and identity keys only travel over HTTPS, except to loopback,
+    to hosts listed in INSECURE_HTTP_HOSTS, or with ALLOW_INSECURE_TRANSPORT=true
+    (development)."""
     parsed = urlparse(url)
-    if parsed.scheme == "https" or allow_insecure or (parsed.scheme == "http" and parsed.hostname in LOOPBACK):
+    if parsed.scheme == "https" or allow_insecure:
         return
-    raise RuntimeError(f"{name} must be an https:// URL (got {url!r}); set ALLOW_INSECURE_TRANSPORT=true for development")
+    if parsed.scheme == "http" and (parsed.hostname in LOOPBACK or (parsed.hostname or "").lower() in http_hosts):
+        return
+    raise RuntimeError(
+        f"{name} must be an https:// URL (got {url!r}); list its host in INSECURE_HTTP_HOSTS to allow plain "
+        "HTTP to it, or set ALLOW_INSECURE_TRANSPORT=true for development"
+    )
+
+
+def tls_verify(ca_file: str | None) -> ssl.SSLContext | bool:
+    """What HTTPS clients verify servers against: the public CAs, plus CA_BUNDLE_FILE when set
+    (for an OpenBao, Terrakube or OIDC provider with a private CA)."""
+    if not ca_file:
+        return True
+    import certifi
+
+    context = ssl.create_default_context(cafile=certifi.where())
+    context.load_verify_locations(cafile=ca_file)
+    return context
 
 
 def require_verified_db_tls(database_url: str, allow_insecure: bool) -> None:
@@ -86,6 +109,16 @@ class Settings:
     # {name} is the lab name. Needs OPENBAO_ADDR.
     access_secret_path: str = "secret/data/labs/{name}"
 
+    # VCS connection for templates with use_vcs_connection, by name instead of
+    # id (TERRAKUBE_VCS_ID wins when both are set). Looked up once.
+    terrakube_vcs_name: str | None = None
+
+    # Hosts that may be reached over plain http://, e.g. in-cluster Terrakube
+    # and OpenBao services that do not serve TLS. Database TLS is unaffected.
+    insecure_http_hosts: tuple[str, ...] = ()
+    # Extra CA certificates (PEM) trusted for HTTPS, besides the public CAs.
+    ca_bundle_file: str | None = None
+
     # Development only: allow plain HTTP to Terrakube, OpenBao and the OIDC
     # issuer, and unverified database TLS.
     allow_insecure_transport: bool = False
@@ -105,13 +138,15 @@ class Settings:
         return cfg
 
     def check_transport(self) -> None:
-        allow = self.allow_insecure_transport
-        require_tls("TERRAKUBE_API_URL", self.terrakube_api_url, allow)
+        allow, hosts = self.allow_insecure_transport, self.insecure_http_hosts
+        require_tls("TERRAKUBE_API_URL", self.terrakube_api_url, allow, hosts)
         for name, url in (("OPENBAO_ADDR", self.openbao_addr), ("USER_TOKEN_ISSUER", self.user_token_issuer),
                           ("USER_TOKEN_JWKS_URL", self.user_token_jwks_url)):
             if url:
-                require_tls(name, url, allow)
+                require_tls(name, url, allow, hosts)
         require_verified_db_tls(self.database_url, allow)
+        if self.ca_bundle_file and not os.path.isfile(self.ca_bundle_file):
+            raise RuntimeError(f"CA_BUNDLE_FILE {self.ca_bundle_file!r} does not exist")
 
     @classmethod
     def _read_env(cls, keys: tuple[str, ...]) -> "Settings":
@@ -123,6 +158,7 @@ class Settings:
             terrakube_ui_url=os.environ["TERRAKUBE_UI_URL"].rstrip("/"),
             terrakube_organization=os.environ["TERRAKUBE_ORGANIZATION"],
             terrakube_vcs_id=os.environ.get("TERRAKUBE_VCS_ID") or None,
+            terrakube_vcs_name=os.environ.get("TERRAKUBE_VCS_NAME") or None,
             terrakube_apply_template=os.environ.get("TERRAKUBE_APPLY_TEMPLATE", "Plan and apply"),
             terrakube_destroy_template=os.environ.get("TERRAKUBE_DESTROY_TEMPLATE", "Destroy"),
             terrakube_token=os.environ.get("TERRAKUBE_TOKEN") or None,
@@ -144,5 +180,7 @@ class Settings:
             access_secret_path=os.environ.get("ACCESS_SECRET_PATH", "secret/data/labs/{name}"),
             terrakube_project=os.environ.get("TERRAKUBE_PROJECT", "Self-service"),
             terrakube_tags=_bool(os.environ.get("TERRAKUBE_TAGS"), True),
+            insecure_http_hosts=_list(os.environ.get("INSECURE_HTTP_HOSTS")),
+            ca_bundle_file=os.environ.get("CA_BUNDLE_FILE") or None,
             allow_insecure_transport=_bool(os.environ.get("ALLOW_INSECURE_TRANSPORT"), False),
         )

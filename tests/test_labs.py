@@ -1,3 +1,4 @@
+import dataclasses
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -488,3 +489,19 @@ async def test_role_matrix(env):
     # Admin: secrets and actions on anyone's lab.
     assert (await client.get(f"{url}/access", headers=ADMIN)).status_code == 200
     assert (await client.post(f"{url}/extend", json={"hours": 1}, headers=ADMIN)).status_code == 200
+
+
+async def test_vcs_connection_by_name(env):
+    client, service, terrakube = env
+    service.settings = dataclasses.replace(service.settings, terrakube_vcs_id=None, terrakube_vcs_name="GitHub Akamai")
+    await client.post("/v1/labs", json=NEW_LAB)
+    assert terrakube.workspaces["ws-1"]["vcs_id"] == "vcs-akamai"
+
+
+async def test_unknown_vcs_connection_fails_the_lab(env):
+    client, service, terrakube = env
+    service.settings = dataclasses.replace(service.settings, terrakube_vcs_id=None, terrakube_vcs_name="GitHub Nope")
+    assert (await client.post("/v1/labs", json=NEW_LAB)).status_code == 502
+    lab = (await client.get("/v1/labs")).json()["items"][0]
+    assert lab["status"] == "failed" and "GitHub Nope" in lab["status_detail"]
+    assert terrakube.workspaces == {}

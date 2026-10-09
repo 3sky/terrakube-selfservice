@@ -24,13 +24,24 @@
 {{- .Values.token.openbao.role | default .Values.openbao.role -}}
 {{- end }}
 
+{{- define "tss.dbCa" -}}
+{{- if or .Values.database.caSecret.name .Values.database.caCert }}true{{ end -}}
+{{- end }}
+
+{{- define "tss.caBundle" -}}
+{{- if or .Values.caBundle.pem .Values.caBundle.configMap.name }}true{{ end -}}
+{{- end }}
+
 {{- define "tss.validate" -}}
 {{- if not .Values.terrakube.uiUrl }}{{ fail "terrakube.uiUrl is required" }}{{ end }}
 {{- if not .Values.terrakube.apiUrl }}{{ fail "terrakube.apiUrl is required" }}{{ end }}
 {{- if not .Values.allowInsecureTransport }}
 {{- range $name, $url := dict "terrakube.apiUrl" .Values.terrakube.apiUrl "openbao.addr" (include "tss.openbaoAddr" .) "users.token.issuer" .Values.users.token.issuer "users.token.jwksUrl" .Values.users.token.jwksUrl "ui.oidc.issuer" .Values.ui.oidc.issuer }}
 {{- if and $url (not (hasPrefix "https://" $url)) }}
-{{- fail (printf "%s must be an https:// URL (or set allowInsecureTransport for development)" $name) }}
+{{- $host := regexReplaceAll ":[0-9]+$" (urlParse $url).host "" | lower }}
+{{- if not (and (hasPrefix "http://" $url) (has $host $.Values.insecureHttpHosts)) }}
+{{- fail (printf "%s must be an https:// URL, or list its host in insecureHttpHosts (or set allowInsecureTransport for development)" $name) }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- if and (not $.Values.existingSecret) (not (hasPrefix "verify-" .Values.database.sslmode)) }}

@@ -22,12 +22,29 @@ stringData:
   {{- with .Values.database }}
   {{- $url := printf "postgresql://%s:%s@%s:%v/%s?sslmode=%s" .user (required "database.password is required" .password) (required "database.host is required" .host) .port .name .sslmode }}
   {{- if hasPrefix "verify-" .sslmode }}
-  {{- $url = printf "%s&sslrootcert=%s" $url (ternary "/etc/terrakube-selfservice-db/ca.crt" "system" (ne .caSecret.name "")) }}
+  {{- $url = printf "%s&sslrootcert=%s" $url (ternary "/etc/terrakube-selfservice-db/ca.crt" "system" (eq (include "tss.dbCa" $) "true")) }}
   {{- end }}
   DATABASE_URL: {{ $url | quote }}
   {{- end }}
   {{- with .Values.token.value }}
   TERRAKUBE_TOKEN: {{ . | quote }}
+  {{- end }}
+{{- end }}
+{{- if or .Values.database.caCert .Values.caBundle.pem }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  namespace: {{ .Release.Namespace }}
+  name: {{ $name }}-ca
+data:
+  {{- with .Values.database.caCert }}
+  database-ca.crt: |
+    {{- . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.caBundle.pem }}
+  ca-bundle.crt: |
+    {{- . | nindent 4 }}
   {{- end }}
 {{- end }}
 {{- if not .Values.existingCatalogConfigMap }}
@@ -69,7 +86,7 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
       annotations:
         # Restart on catalog or credential changes.
-        checksum/config: {{ printf "%s|%s|%s|%s|%s" (toJson .Values.catalog) (toJson .Values.apiKeys) (toJson .Values.database) .Values.token.value (toJson .Values.ui) | sha256sum }}
+        checksum/config: {{ printf "%s|%s|%s|%s|%s" (toJson .Values.catalog) (toJson .Values.apiKeys) (toJson .Values.database) .Values.token.value (toJson .Values.ui) | cat (toJson .Values.caBundle) | sha256sum }}
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
       # The token is only needed for OpenBao Kubernetes auth.
@@ -104,6 +121,10 @@ spec:
               value: {{ .Values.terrakube.organization | quote }}
             - name: TERRAKUBE_VCS_ID
               value: {{ .Values.terrakube.vcsId | quote }}
+            {{- with .Values.terrakube.vcsName }}
+            - name: TERRAKUBE_VCS_NAME
+              value: {{ . | quote }}
+            {{- end }}
             - name: TERRAKUBE_APPLY_TEMPLATE
               value: {{ .Values.terrakube.applyTemplate | quote }}
             - name: TERRAKUBE_DESTROY_TEMPLATE
@@ -170,6 +191,14 @@ spec:
             {{- end }}
             - name: ALLOW_INSECURE_TRANSPORT
               value: {{ .Values.allowInsecureTransport | quote }}
+            {{- with .Values.insecureHttpHosts }}
+            - name: INSECURE_HTTP_HOSTS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if include "tss.caBundle" . }}
+            - name: CA_BUNDLE_FILE
+              value: /etc/terrakube-selfservice-ca/ca.crt
+            {{- end }}
             - name: RECONCILE_INTERVAL_SECONDS
               value: {{ .Values.reconcileIntervalSeconds | quote }}
             - name: DELETE_WORKSPACE_AFTER_DESTROY
@@ -207,9 +236,14 @@ spec:
               mountPath: /etc/terrakube-selfservice-tls
               readOnly: true
             {{- end }}
-            {{- if .Values.database.caSecret.name }}
+            {{- if include "tss.dbCa" . }}
             - name: db-ca
               mountPath: /etc/terrakube-selfservice-db
+              readOnly: true
+            {{- end }}
+            {{- if include "tss.caBundle" . }}
+            - name: ca-bundle
+              mountPath: /etc/terrakube-selfservice-ca
               readOnly: true
             {{- end }}
             - name: tmp
@@ -233,15 +267,35 @@ spec:
           secret:
             secretName: {{ . }}
         {{- end }}
-        {{- with .Values.database.caSecret }}
-        {{- if .name }}
+        {{- if .Values.database.caSecret.name }}
         - name: db-ca
           secret:
-            secretName: {{ .name }}
+            secretName: {{ .Values.database.caSecret.name }}
             items:
-              - key: {{ .key }}
+              - key: {{ .Values.database.caSecret.key }}
+                path: ca.crt
+        {{- else if .Values.database.caCert }}
+        - name: db-ca
+          configMap:
+            name: {{ $name }}-ca
+            items:
+              - key: database-ca.crt
                 path: ca.crt
         {{- end }}
+        {{- if .Values.caBundle.configMap.name }}
+        - name: ca-bundle
+          configMap:
+            name: {{ .Values.caBundle.configMap.name }}
+            items:
+              - key: {{ .Values.caBundle.configMap.key }}
+                path: ca.crt
+        {{- else if .Values.caBundle.pem }}
+        - name: ca-bundle
+          configMap:
+            name: {{ $name }}-ca
+            items:
+              - key: ca-bundle.crt
+                path: ca.crt
         {{- end }}
         - name: tmp
           emptyDir: {}

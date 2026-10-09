@@ -13,7 +13,7 @@ BASE_ENV = {
 @pytest.fixture
 def env(monkeypatch):
     for name in ("ALLOW_INSECURE_TRANSPORT", "OPENBAO_ADDR", "USER_TOKEN_ISSUER", "USER_TOKEN_AUDIENCE",
-                 "USER_TOKEN_JWKS_URL", "PGHOST", "PGSSLMODE"):
+                 "USER_TOKEN_JWKS_URL", "PGHOST", "PGSSLMODE", "INSECURE_HTTP_HOSTS", "CA_BUNDLE_FILE"):
         monkeypatch.delenv(name, raising=False)
     for name, value in BASE_ENV.items():
         monkeypatch.setenv(name, value)
@@ -70,3 +70,53 @@ def test_portal_issuer_needs_https(monkeypatch):
         UISettings.from_env()
     monkeypatch.setenv("UI_OIDC_ISSUER", "https://dex.example.com")
     assert UISettings.from_env().oidc_issuer == "https://dex.example.com"
+
+
+def test_listed_hosts_may_use_plain_http(env):
+    env.setenv("TERRAKUBE_API_URL", "http://terrakube-api-service.terrakube.svc.cluster.local:8080")
+    env.setenv("OPENBAO_ADDR", "http://openbao.terrakube.svc.cluster.local:8200")
+    env.setenv("INSECURE_HTTP_HOSTS", "Terrakube-API-Service.terrakube.svc.cluster.local, openbao.terrakube.svc.cluster.local")
+    cfg = Settings.from_env()
+    assert cfg.insecure_http_hosts == ("terrakube-api-service.terrakube.svc.cluster.local",
+                                       "openbao.terrakube.svc.cluster.local")
+
+
+def test_listed_hosts_do_not_relax_other_checks(env):
+    env.setenv("INSECURE_HTTP_HOSTS", "openbao.terrakube.svc.cluster.local")
+    env.setenv("OPENBAO_ADDR", "http://bao.elsewhere.example.com:8200")
+    with pytest.raises(RuntimeError, match="INSECURE_HTTP_HOSTS"):
+        Settings.from_env()
+    env.setenv("OPENBAO_ADDR", "http://openbao.terrakube.svc.cluster.local:8200")
+    env.setenv("DATABASE_URL", "postgresql://u:p@db.example.com/x?sslmode=require")
+    with pytest.raises(RuntimeError, match="sslmode"):
+        Settings.from_env()
+
+
+def test_ca_bundle_must_exist(env, tmp_path):
+    env.setenv("CA_BUNDLE_FILE", str(tmp_path / "missing.crt"))
+    with pytest.raises(RuntimeError, match="CA_BUNDLE_FILE"):
+        Settings.from_env()
+
+
+def test_ca_bundle_extends_public_cas(tmp_path):
+    import ssl
+
+    import certifi
+
+    from app.config import tls_verify
+
+    assert tls_verify(None) is True
+    bundle = tmp_path / "ca.crt"
+    bundle.write_text(open(certifi.where()).read().split("-----END CERTIFICATE-----")[0] + "-----END CERTIFICATE-----\n")
+    context = tls_verify(str(bundle))
+    assert isinstance(context, ssl.SSLContext) and context.verify_mode == ssl.CERT_REQUIRED
+    assert context.cert_store_stats()["x509_ca"] > 1  # public CAs plus the bundle
+
+
+def test_portal_issuer_may_be_a_listed_http_host(monkeypatch):
+    monkeypatch.delenv("ALLOW_INSECURE_TRANSPORT", raising=False)
+    monkeypatch.setenv("UI_ENABLED", "true")
+    monkeypatch.setenv("UI_SESSION_SECRET", "x" * 32)
+    monkeypatch.setenv("UI_OIDC_ISSUER", "http://dex.terrakube.svc:5556/dex")
+    monkeypatch.setenv("INSECURE_HTTP_HOSTS", "dex.terrakube.svc")
+    assert UISettings.from_env().oidc_issuer == "http://dex.terrakube.svc:5556/dex"

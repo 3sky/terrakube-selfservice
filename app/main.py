@@ -1,6 +1,7 @@
 import asyncio
 import hmac
 import logging
+import ssl
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Annotated
@@ -12,7 +13,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .catalog import Catalog
-from .config import Settings
+from .config import Settings, tls_verify
 from .db import Database
 from .identity import Caller, IdentityError, IdentityResolver, discover_jwks_url
 from .models import (
@@ -100,11 +101,13 @@ def identity_from_settings(cfg: Settings) -> IdentityResolver:
         return IdentityResolver(cfg.admin_emails, auditor_emails=cfg.auditor_emails)
     import jwt
 
-    jwks_url = cfg.user_token_jwks_url or discover_jwks_url(cfg.user_token_issuer)
+    verify = tls_verify(cfg.ca_bundle_file)
+    jwks_url = cfg.user_token_jwks_url or discover_jwks_url(cfg.user_token_issuer, verify)
+    keys = jwt.PyJWKClient(jwks_url, cache_keys=True, lifespan=600,
+                           ssl_context=verify if isinstance(verify, ssl.SSLContext) else None)
     return IdentityResolver(
         cfg.admin_emails, auditor_emails=cfg.auditor_emails, issuer=cfg.user_token_issuer,
-        audience=cfg.user_token_audience,
-        signing_keys=jwt.PyJWKClient(jwks_url, cache_keys=True, lifespan=600), email_claim=cfg.user_token_email_claim,
+        audience=cfg.user_token_audience, signing_keys=keys, email_claim=cfg.user_token_email_claim,
         require_verified_email=cfg.require_verified_email,
     )
 
@@ -122,7 +125,7 @@ def build_app(
         http = None
         if service is None:
             cfg = settings or Settings.from_env()
-            http = httpx.AsyncClient(timeout=30)
+            http = httpx.AsyncClient(timeout=30, verify=tls_verify(cfg.ca_bundle_file))
             bao = OpenBaoClient(http, cfg.openbao_addr, cfg.openbao_role) if cfg.openbao_addr else None
             tokens: TokenSource
             if cfg.terrakube_token:
@@ -161,7 +164,7 @@ def build_app(
 
     app = FastAPI(
         title="Terrakube Self-Service",
-        version="0.6.1",
+        version="0.7.2",
         description=API_DESCRIPTION,
         openapi_tags=OPENAPI_TAGS,
         lifespan=lifespan,

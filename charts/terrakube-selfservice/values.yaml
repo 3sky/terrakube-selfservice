@@ -29,10 +29,12 @@ database:
   # (require, prefer, ...) need allowInsecureTransport.
   sslmode: verify-full
   # CA for verify-ca/verify-full: a Secret holding the server's CA certificate,
-  # or "system" trust (public CAs) when no Secret is given.
+  # or the PEM itself in caCert (put in a ConfigMap), or "system" trust (public
+  # CAs) when neither is given.
   caSecret:
     name: ""
     key: ca.crt
+  caCert: ""
 # Or an existing Secret with API_KEYS (comma-separated) and DATABASE_URL keys;
 # apiKeys and database are then ignored.
 existingSecret: ""
@@ -45,8 +47,10 @@ terrakube:
   uiUrl: ""
   # Organization that owns the lab workspaces. Required.
   organization: ""
-  # VCS connection id for private template repositories (optional).
+  # VCS connection for private template repositories (optional): its id, or
+  # its name as shown in Terrakube (Settings > VCS Providers). The id wins.
   vcsId: ""
+  vcsName: ""
   applyTemplate: Plan and apply
   destroyTemplate: Destroy
   # Project for lab workspaces, created if missing; "" = no project.
@@ -108,6 +112,21 @@ access:
 # Development only: allow http:// for Terrakube, OpenBao and OIDC issuers and
 # database sslmode weaker than verify-ca. Credentials then travel unprotected.
 allowInsecureTransport: false
+
+# Hosts that may be reached over plain http:// (Terrakube, OpenBao, OIDC),
+# for in-cluster services without TLS, e.g.
+#   [terrakube-api-service.terrakube.svc.cluster.local, openbao.terrakube.svc.cluster.local]
+# Keep the traffic inside the cluster and restrict it with NetworkPolicies.
+# Database TLS is not affected.
+insecureHttpHosts: []
+
+# Extra CA certificates (PEM) trusted for HTTPS to Terrakube, OpenBao and the
+# OIDC provider, besides the public CAs: inline, or a key of an existing ConfigMap.
+caBundle:
+  pem: ""
+  configMap:
+    name: ""
+    key: ca.crt
 
 reconcileIntervalSeconds: 30
 deleteWorkspaceAfterDestroy: true

@@ -11,6 +11,7 @@ then taken from one of:
 """
 
 import asyncio
+import ssl
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -106,8 +107,8 @@ class IdentityResolver:
         return verified_email(claims, self._email_claim, self._require_verified)
 
 
-def discover_jwks_url(issuer: str) -> str:
+def discover_jwks_url(issuer: str, verify: ssl.SSLContext | bool = True) -> str:
     """The issuer's jwks_uri from its OpenID discovery document."""
-    response = httpx.get(f"{issuer.rstrip('/')}/.well-known/openid-configuration", timeout=10)
+    response = httpx.get(f"{issuer.rstrip('/')}/.well-known/openid-configuration", timeout=10, verify=verify)
     response.raise_for_status()
     return response.json()["jwks_uri"]

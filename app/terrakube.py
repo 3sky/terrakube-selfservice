@@ -100,6 +100,8 @@ class Terrakube(Protocol):
 
     async def project_id(self, name: str) -> str: ...
 
+    async def vcs_id(self, name: str) -> str: ...
+
     async def set_workspace_tags(self, workspace_id: str, tags: dict[str, str]) -> None: ...
 
     async def release_workspace_tags(self, workspace_id: str, keys: list[str]) -> None: ...
@@ -123,6 +125,7 @@ class TerrakubeClient:
         self._org_id: str | None = None
         self._templates: dict[str, str] = {}
         self._projects: dict[str, str] = {}
+        self._vcs: dict[str, str] = {}
 
     async def _request(self, method: str, path: str, body: dict[str, Any] | None = None, *, retry: bool = True) -> Any:
         token = await self._tokens.get()
@@ -202,6 +205,17 @@ class TerrakubeClient:
                     "name": name, "description": "Labs created by terrakube-selfservice"}}}
                 self._projects[name] = (await self._request("POST", f"organization/{org}/project", body))["data"]["id"]
         return self._projects[name]
+
+    async def vcs_id(self, name: str) -> str:
+        """Id of the organisation's VCS connection `name` (Settings > VCS Providers)."""
+        if name not in self._vcs:
+            org = await self.organization_id()
+            connections = (await self._request("GET", f"organization/{org}/vcs"))["data"]
+            found = [c["id"] for c in connections if c["attributes"].get("name") == name]
+            if not found:
+                raise TerrakubeError(f"VCS connection {name!r} not found in organization {self._org_name!r}")
+            self._vcs[name] = found[0]
+        return self._vcs[name]
 
     # Tags. Terrakube before 2.34 has no tag values, so a tag is `key:value`
     # (e.g. lab_owner:alice@example.com), created at organisation level on first use.

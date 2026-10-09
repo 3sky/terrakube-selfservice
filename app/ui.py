@@ -22,7 +22,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from .config import _bool, require_tls
+from .config import _bool, _list, require_tls, tls_verify
 from .identity import Caller, IdentityError, verified_email
 
 log = logging.getLogger(__name__)
@@ -59,6 +59,8 @@ class UISettings:
     dev_user_email: str | None
     title: str
     require_verified_email: bool = True
+    # Extra CA certificates (PEM) for the OIDC provider, as CA_BUNDLE_FILE.
+    ca_bundle_file: str | None = None
 
     @property
     def base_path(self) -> str:
@@ -76,7 +78,8 @@ class UISettings:
         if issuer and len(secret) < 32:
             raise RuntimeError("UI_SESSION_SECRET must be at least 32 characters")
         if issuer:
-            require_tls("UI_OIDC_ISSUER", issuer, _bool(os.environ.get("ALLOW_INSECURE_TRANSPORT"), False))
+            require_tls("UI_OIDC_ISSUER", issuer, _bool(os.environ.get("ALLOW_INSECURE_TRANSPORT"), False),
+                        _list(os.environ.get("INSECURE_HTTP_HOSTS")))
         return cls(
             public_url=os.environ.get("UI_PUBLIC_URL", "http://localhost:8080/ui").rstrip("/"),
             oidc_issuer=issuer,
@@ -88,6 +91,7 @@ class UISettings:
             session_https_only=_bool(os.environ.get("UI_SESSION_HTTPS_ONLY"), issuer is not None),
             dev_user_email=dev_user if issuer is None else None,
             title=os.environ.get("UI_TITLE", "Lab self-service"),
+            ca_bundle_file=os.environ.get("CA_BUNDLE_FILE") or None,
             require_verified_email=_bool(os.environ.get("REQUIRE_VERIFIED_EMAIL"), True),
         )
 
@@ -114,7 +118,7 @@ def mount_ui(app: FastAPI, cfg: UISettings, add_routes: Callable) -> None:
         oauth.register(
             "oidc", server_metadata_url=f"{cfg.oidc_issuer}/.well-known/openid-configuration",
             client_id=cfg.oidc_client_id, client_secret=cfg.oidc_client_secret,
-            client_kwargs={"scope": cfg.oidc_scopes},
+            client_kwargs={"scope": cfg.oidc_scopes, "verify": tls_verify(cfg.ca_bundle_file)},
         )
 
     public = urlparse(cfg.public_url)

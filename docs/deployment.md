@@ -39,7 +39,7 @@ terrakube:
   apiUrl: https://terrakube-api.example.com
   uiUrl: https://terrakube.example.com
   organization: my-org
-  vcsId: "<VCS connection id>"    # for private template repositories
+  vcsName: GitHub                 # VCS connection for private template repositories (or vcsId)
 openbao:
   addr: https://openbao.openbao.svc:8200
 users:
@@ -47,6 +47,27 @@ users:
 ```
 
 The chart refuses to install when the catalog is invalid, no Terrakube token source is set, or required values are missing.
+
+### Transport security
+
+Everything that carries a credential is verified:
+
+- **HTTPS** to Terrakube, OpenBao and the OIDC provider. For a server with a private CA, add the CA with `caBundle.pem` (or `caBundle.configMap`); it is trusted in addition to the public CAs.
+- **Plain HTTP, per host.** In-cluster Terrakube and OpenBao often serve no TLS. List those hosts, and only those, in `insecureHttpHosts`. Keep that traffic inside the cluster and limit it with NetworkPolicies (`networkPolicy.*` here, and on the Terrakube and OpenBao side):
+
+  ```yaml
+  terrakube:
+    apiUrl: http://terrakube-api-service.terrakube.svc.cluster.local:8080
+  openbao:
+    addr: http://openbao.terrakube.svc.cluster.local:8200
+  insecureHttpHosts:
+    - terrakube-api-service.terrakube.svc.cluster.local
+    - openbao.terrakube.svc.cluster.local
+  ```
+
+  This is usually safer than reaching the same services through a public hostname and CDN.
+- **Database:** `sslmode` `verify-full` (default) or `verify-ca`, with the server's CA from `database.caCert` (PEM), `database.caSecret`, or the public CAs. Managed databases with a private project CA (Linode, for example) need `caCert` or `caSecret`. `insecureHttpHosts` never relaxes this.
+- `allowInsecureTransport` turns all of these checks off, for local development only.
 
 ## Values
 
@@ -57,12 +78,13 @@ The chart refuses to install when the catalog is invalid, no Terrakube token sou
 | `apiKeys` | none | Bearer keys for portals; several allow rotation |
 | `database.*` | | PostgreSQL connection (`host`, `port`, `name`, `user`, `password`) |
 | `database.sslmode` | `verify-full` | `verify-full` or `verify-ca`; weaker modes need `allowInsecureTransport` |
-| `database.caSecret.name`, `.key` | `""`, `ca.crt` | Secret with the database server's CA; without it, public CAs (`sslrootcert=system`) |
+| `database.caSecret.name`, `.key` | `""`, `ca.crt` | Secret with the database server's CA |
+| `database.caCert` | `""` | The database server's CA as PEM (put in a ConfigMap); without it or `caSecret`, public CAs (`sslrootcert=system`) |
 | `existingSecret` | `""` | A Secret with `API_KEYS` and `DATABASE_URL` instead of the two above |
 | `terrakube.apiUrl` | required | Terrakube API base URL, `https://` |
 | `terrakube.uiUrl` | required | Used for `workspace_url` links |
 | `terrakube.organization` | required | Organization for lab workspaces |
-| `terrakube.vcsId` | `""` | VCS connection for private template repositories |
+| `terrakube.vcsId`, `terrakube.vcsName` | `""` | VCS connection for private template repositories, by id or by its name in Terrakube (looked up once; the id wins) |
 | `terrakube.applyTemplate`, `destroyTemplate` | `Plan and apply`, `Destroy` | Terrakube run templates |
 | `terrakube.project` | `Self-service` | Project for lab workspaces, created if missing; `""` for none |
 | `terrakube.tags` | `true` | Tag workspaces with `lab_owner:` and `expires_at:` |
@@ -74,6 +96,8 @@ The chart refuses to install when the catalog is invalid, no Terrakube token sou
 | `users.token.*` | | Token mode ([below](#users)) |
 | `users.requireVerifiedEmail` | `true` | OIDC identities (token mode, portal) need `email_verified: true`; `false` only for providers that omit the claim |
 | `serviceAccount.name` | `terrakube-selfservice` | Service account bound in OpenBao/Vault |
+| `insecureHttpHosts` | `[]` | Hosts allowed over `http://` (in-cluster Terrakube, OpenBao); see [transport security](#transport-security) |
+| `caBundle.pem`, `caBundle.configMap.name`, `.key` | `""` | Extra CA certificates for HTTPS to Terrakube, OpenBao and the OIDC provider |
 | `allowInsecureTransport` | `false` | Development only: allow `http://` Terrakube, OpenBao and OIDC URLs and unverified database TLS |
 | `reconcileIntervalSeconds` | `30` | How often labs are checked and expired |
 | `deleteWorkspaceAfterDestroy` | `true` | Remove the workspace after a successful destroy |
@@ -189,7 +213,7 @@ For running the image without the chart:
 | `TERRAKUBE_API_URL` | required | Terrakube API, `https://` |
 | `TERRAKUBE_UI_URL` | required | Terrakube UI, for links |
 | `TERRAKUBE_ORGANIZATION` | required | Organization for labs |
-| `TERRAKUBE_VCS_ID` | | VCS connection for private templates |
+| `TERRAKUBE_VCS_ID`, `TERRAKUBE_VCS_NAME` | | VCS connection for private templates, by id or by name |
 | `TERRAKUBE_APPLY_TEMPLATE`, `TERRAKUBE_DESTROY_TEMPLATE` | `Plan and apply`, `Destroy` | Run templates |
 | `TERRAKUBE_PROJECT` | `Self-service` | Project; empty for none |
 | `TERRAKUBE_TAGS` | `true` | Workspace tags |
@@ -201,6 +225,8 @@ For running the image without the chart:
 | `USER_TOKEN_ISSUER`, `USER_TOKEN_AUDIENCE`, `USER_TOKEN_JWKS_URL`, `USER_TOKEN_EMAIL_CLAIM` | , , discovery, `email` | Token mode; the audience is required with an issuer |
 | `REQUIRE_VERIFIED_EMAIL` | `true` | Reject OIDC identities without `email_verified: true` |
 | `UVICORN_SSL_CERTFILE`, `UVICORN_SSL_KEYFILE` | | Serve HTTPS (the chart's `tls.secretName` sets them) |
+| `INSECURE_HTTP_HOSTS` | | Comma-separated hosts allowed over `http://`; database TLS unaffected |
+| `CA_BUNDLE_FILE` | | PEM file of extra CA certificates for HTTPS clients |
 | `ALLOW_INSECURE_TRANSPORT` | `false` | Development only: allow `http://` (Terrakube, OpenBao, OIDC issuers, JWKS) and unverified database TLS; loopback is always allowed |
 | `RECONCILE_INTERVAL_SECONDS` | `30` | Loop interval |
 | `PENDING_TIMEOUT_MINUTES` | `10` | When a stuck `pending` lab is marked failed |

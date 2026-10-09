@@ -197,7 +197,7 @@ class LabService:
                 folder=template.source.folder,
                 iac_type=template.source.iac_type,
                 iac_version=template.source.iac_version,
-                vcs_id=self.settings.terrakube_vcs_id if template.source.use_vcs_connection else None,
+                vcs_id=await self._vcs_id() if template.source.use_vcs_connection else None,
                 project_id=project_id,
             )
             await self.db.update_lab(
@@ -255,6 +255,11 @@ class LabService:
         if request.name:
             raise LabError(409, f"a lab named {request.name!r} already exists")
         raise LabError(409, "could not generate a free lab name; retry or pass one")
+
+    async def _vcs_id(self) -> str | None:
+        if self.settings.terrakube_vcs_id or not self.settings.terrakube_vcs_name:
+            return self.settings.terrakube_vcs_id
+        return await self.terrakube.vcs_id(self.settings.terrakube_vcs_name)
 
     async def _project_id(self) -> str | None:
         if not self.settings.terrakube_project:
