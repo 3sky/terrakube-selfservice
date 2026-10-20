@@ -156,10 +156,6 @@ def mount_ui(app: FastAPI, cfg: UISettings, add_routes: Callable) -> None:
 
     ui_api = APIRouter(prefix="/ui/api", include_in_schema=False)
 
-    @ui_api.get("/me", dependencies=[Depends(from_portal)])
-    async def me(caller: Caller = Depends(session_caller)) -> dict:
-        return {"email": caller.email, "role": caller.role, "admin": caller.admin, "sees_all": caller.sees_all}
-
     add_routes(ui_api, session_caller, session_reporter, [Depends(from_portal)])
     app.include_router(ui_api)
 

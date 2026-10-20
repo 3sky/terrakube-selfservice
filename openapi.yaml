@@ -40,8 +40,60 @@ info:
 
 
     Integration guide: https://github.com/3sky/terrakube-selfservice/blob/main/docs/portal-integration.md'
-  version: 0.7.2
+  version: 0.7.3
 paths:
+  /v1/me:
+    get:
+      tags:
+      - users
+      summary: The calling user and their role
+      operationId: me
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: X-Actor-Email
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Header mode: the signed-in user, set by the portal backend
+            from its own session. Ignored in token mode.'
+          title: X-Actor-Email
+        description: 'Header mode: the signed-in user, set by the portal backend from
+          its own session. Ignored in token mode.'
+      - name: X-User-Token
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Token mode: the signed-in user''s OIDC ID token, verified
+            by the service.'
+          title: X-User-Token
+        description: 'Token mode: the signed-in user''s OIDC ID token, verified by
+          the service.'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentUser'
+        '401':
+          description: Missing or invalid API key or user identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /v1/templates:
     get:
       tags:
@@ -1161,6 +1213,34 @@ components:
       - templates
       - method
       title: CostReport
+    CurrentUser:
+      properties:
+        email:
+          type: string
+          title: Email
+        role:
+          type: string
+          enum:
+          - user
+          - auditor
+          - admin
+          title: Role
+        admin:
+          type: boolean
+          title: Admin
+          description: Acts on every lab
+        sees_all:
+          type: boolean
+          title: Sees All
+          description: Sees every lab and the reports (auditor or admin)
+      type: object
+      required:
+      - email
+      - role
+      - admin
+      - sees_all
+      title: CurrentUser
+      description: Who the call is made for, as the service sees it.
     DailyPoint:
       properties:
         day:

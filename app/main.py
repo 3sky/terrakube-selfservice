@@ -17,8 +17,8 @@ from .config import Settings, tls_verify
 from .db import Database
 from .identity import Caller, IdentityError, IdentityResolver, discover_jwks_url
 from .models import (
-    AnalyticsSummary, AnalyticsTimeseries, CostReport, DestroyRequest, Estimate, EstimateRequest, ExtendRequest,
-    Lab, LabAccess, LabCreate, LabEventList, LabList, LabStatus, Problem, Template, TemplateList,
+    AnalyticsSummary, AnalyticsTimeseries, CostReport, CurrentUser, DestroyRequest, Estimate, EstimateRequest,
+    ExtendRequest, Lab, LabAccess, LabCreate, LabEventList, LabList, LabStatus, Problem, Template, TemplateList,
 )
 from .openbao import OpenBaoClient
 from .service import LabError, LabService, now
@@ -164,7 +164,7 @@ def build_app(
 
     app = FastAPI(
         title="Terrakube Self-Service",
-        version="0.7.2",
+        version="0.7.3",
         description=API_DESCRIPTION,
         openapi_tags=OPENAPI_TAGS,
         lifespan=lifespan,
@@ -208,6 +208,11 @@ def build_app(
         """Templates, labs and analytics, for one way of identifying the caller (API or UI)."""
         User = Annotated[Caller, Depends(user_dep)]  # noqa: N806
         Reporter = Annotated[Caller, Depends(reports_dep)]  # noqa: N806
+
+        @router.get("/me", response_model=CurrentUser, dependencies=deps, tags=["users"],
+                    summary="The calling user and their role", responses=errors())
+        async def me(caller: User) -> CurrentUser:
+            return CurrentUser(email=caller.email, role=caller.role, admin=caller.admin, sees_all=caller.sees_all)
 
         @router.get("/templates", response_model=TemplateList, dependencies=deps, tags=["templates"],
                  summary="List lab templates", responses=errors())

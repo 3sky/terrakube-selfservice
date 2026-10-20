@@ -505,3 +505,11 @@ async def test_unknown_vcs_connection_fails_the_lab(env):
     lab = (await client.get("/v1/labs")).json()["items"][0]
     assert lab["status"] == "failed" and "GitHub Nope" in lab["status_detail"]
     assert terrakube.workspaces == {}
+
+
+async def test_me_reports_the_callers_role(env):
+    client, _, _ = env
+    assert (await client.get("/v1/me")).json() == {
+        "email": "alice@example.com", "role": "user", "admin": False, "sees_all": False}
+    assert (await client.get("/v1/me", headers=AUDITOR)).json()["sees_all"] is True
+    assert (await client.get("/v1/me", headers=ADMIN)).json()["admin"] is True

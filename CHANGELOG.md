@@ -2,6 +2,10 @@
 
 Image `ghcr.io/3sky/terrakube-selfservice` and chart `oci://ghcr.io/3sky/charts/terrakube-selfservice` share these versions.
 
+## 0.7.3
+
+- `GET /v1/me`: the calling user's email and role (`user`, `auditor`, `admin`), so an external portal can show or hide admin and report screens. The built-in portal's `/ui/api/me` now uses the same code.
+
 ## 0.7.2
 
 Makes 0.7.0's transport checks usable with in-cluster services and private CAs, without turning them all off.

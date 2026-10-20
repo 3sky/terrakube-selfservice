@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -308,3 +308,12 @@ class AnalyticsTimeseries(BaseModel):
 
 class Problem(BaseModel):
     detail: str | list[Any] = Field(description="Message, or a list of field errors for 422 validation failures.")
+
+
+class CurrentUser(BaseModel):
+    """Who the call is made for, as the service sees it."""
+
+    email: str
+    role: Literal["user", "auditor", "admin"]
+    admin: bool = Field(description="Acts on every lab")
+    sees_all: bool = Field(description="Sees every lab and the reports (auditor or admin)")
