@@ -51,7 +51,7 @@ jobs:
             --config p/secrets --config security/semgrep/project.yml \
             --sarif-output semgrep.sarif
       - if: ${{ !cancelled() && !github.event.pull_request.head.repo.fork }}
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           sarif_file: semgrep.sarif
           category: semgrep
@@ -130,7 +130,7 @@ jobs:
           docker run --rm -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' -v "$PWD:/repo" "$GITLEAKS_IMAGE" git /repo \
             --redact --exit-code 1 --report-format sarif --report-path /repo/gitleaks.sarif
       - if: ${{ !cancelled() && !github.event.pull_request.head.repo.fork }}
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           sarif_file: gitleaks.sarif
           category: gitleaks
@@ -192,7 +192,7 @@ jobs:
             --config-file security/checkov.yaml -f rendered/chart.yaml \
             --output cli --output sarif --output-file-path console,rendered/checkov.sarif
       - if: ${{ !cancelled() && !github.event.pull_request.head.repo.fork }}
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           sarif_file: rendered/checkov.sarif
           category: checkov
@@ -220,7 +220,7 @@ jobs:
           fail-build: true
           output-format: sarif
       - if: ${{ !cancelled() && steps.grype.outputs.sarif && !github.event.pull_request.head.repo.fork }}
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           sarif_file: ${{ steps.grype.outputs.sarif }}
           category: grype
