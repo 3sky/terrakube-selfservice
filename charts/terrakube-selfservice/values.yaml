@@ -130,6 +130,8 @@ caBundle:
 
 reconcileIntervalSeconds: 30
 deleteWorkspaceAfterDestroy: true
+# How far ahead users may schedule a lab (start_at).
+maxScheduleDays: 30
 
 serviceAccount:
   # Bind this name in your OpenBao/Vault Kubernetes auth role.

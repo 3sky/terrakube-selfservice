@@ -98,12 +98,15 @@ Show `total` for the chosen lifetime and `hourly`, labelled as an estimate. `404
 
 ```http
 POST /v1/labs
-{"template_id": "lke-lab", "ttl_hours": 4, "inputs": {"node_pool_instance_count": 2}}
+{"template_id": "lke-lab", "ttl_hours": 4, "inputs": {"node_pool_instance_count": 2},
+ "case_id": "F-CS-1234567", "start_at": "2026-11-18T09:00:00+01:00"}
 ```
 
+- `case_id` is optional free text (up to 64 characters, no line breaks): the case or project the lab is for. Cost reports add up labs per case across everyone who worked on it; `GET /v1/labs?case_id=...` lists them.
+- `start_at` schedules the lab: an ISO 8601 time with a time zone (send the user's local time with its offset, or UTC), at most `MAX_SCHEDULE_DAYS` (default 30) ahead. The answer is the lab in `scheduled`; its workspace is created at once, so input errors still show immediately, and the apply is queued at `start_at`. The lifetime (`ttl_hours`, `max_ttl_hours`) and the cost count from the start. A time in the past is `422`; one within two minutes means "now".
 - `owner_email` defaults to the user; only admins may create labs for someone else (`403` otherwise).
 - `name` is optional. Omit it and the service picks `<owner>-<5 random chars>`, for example `alice-k3x9p`. If users may choose one, handle `409` (name taken).
-- The answer is `202` with the new lab in `provisioning`; open its page.
+- The answer is `202` with the new lab in `provisioning` (or `scheduled`); open its page.
 
 ### My labs and the lab page
 
@@ -156,9 +159,9 @@ POST /v1/labs
 
 | Action | Call | Notes |
 |---|---|---|
-| Extend | `POST /v1/labs/{id}/extend` `{"hours": 4}` | Capped at the template's `max_ttl_hours` from creation; `409` when the cap is reached. The cost grows at the same hourly price. |
+| Extend | `POST /v1/labs/{id}/extend` `{"hours": 4}` | Capped at the template's `max_ttl_hours` from creation (scheduled labs: from `start_at`); `409` when the cap is reached. The cost grows at the same hourly price. |
 | Retry | `POST /v1/labs/{id}/retry` | Re-runs a `failed` lab's apply in its workspace; `409` explains when that is not possible |
-| Destroy | `POST /v1/labs/{id}/destroy` `{"reason": "done"}` | Ask for confirmation first. The lab goes to `destroying`, then `destroyed` |
+| Destroy | `POST /v1/labs/{id}/destroy` `{"reason": "done"}` | Ask for confirmation first. The lab goes to `destroying`, then `destroyed`. A `scheduled` lab is cancelled: straight to `destroyed`, nothing to run |
 
 ### Reports
 
@@ -166,7 +169,7 @@ For auditors and admins (`403` for users):
 
 - `GET /v1/analytics/summary?days=30`: labs by status, `active_labs`, `needs_attention` (labs whose cleanup failed), created, destroyed, expired, failures, and per template: lifetimes and time to ready.
 - `GET /v1/analytics/timeseries?days=30`: created, destroyed and expired labs per day, for a chart.
-- `GET /v1/analytics/costs?days=30`: total lab-hours and estimated cost, then each owner split by template, then per template. Show its `method` text next to the numbers, so readers know they are list-price estimates.
+- `GET /v1/analytics/costs?days=30`: total lab-hours and estimated cost, then each owner split by template, each case (`cases`: case ID, the people on it, split by template; `case_id: null` collects labs without one), then per template. Show its `method` text next to the numbers, so readers know they are list-price estimates.
 
 ## 5. Errors
 

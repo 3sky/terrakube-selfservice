@@ -59,6 +59,9 @@ label small { color: var(--muted); }
 input, select { font: inherit; padding: 5px 11px; border: 1px solid #d9d9d9; border-radius: 6px; background: #fff; min-height: 34px; }
 input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(114, 46, 209, .15); }
 .check { display: flex; gap: 8px; align-items: center; }
+fieldset.start { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px 12px; margin: 0; display: grid; gap: 8px; }
+fieldset.start legend { padding: 0 4px; }
+fieldset.start small { color: var(--muted); }
 .estimate { background: var(--accent-soft); border: 1px solid #d3adf7; border-radius: 8px; padding: 12px 14px; }
 .estimate b { font-size: 18px; }
 
@@ -77,6 +80,7 @@ th { color: var(--muted); font-weight: 500; background: #fafafa; }
 tr.click { cursor: pointer; } tr.click:hover td { background: #fafafa; }
 .badge { display: inline-block; padding: 0 8px; border-radius: 4px; font-size: 12px; line-height: 22px; border: 1px solid #d9d9d9; background: #fafafa; color: var(--muted); }
 .badge.ready { background: var(--ok-soft); border-color: #b7eb8f; color: var(--ok); }
+.badge.scheduled { background: #e6f4ff; border-color: #91caff; color: #0958d9; }
 .badge.provisioning, .badge.pending, .badge.destroying { background: var(--warn-soft); border-color: #ffe58f; color: var(--warn); }
 .badge.failed, .badge.destroy_failed { background: var(--bad-soft); border-color: #ffa39e; color: var(--bad); }
 dl.facts { display: grid; grid-template-columns: 200px 1fr; gap: 10px 16px; margin: 0; }

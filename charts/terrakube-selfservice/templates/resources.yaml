@@ -203,6 +203,8 @@ spec:
               value: {{ .Values.reconcileIntervalSeconds | quote }}
             - name: DELETE_WORKSPACE_AFTER_DESTROY
               value: {{ .Values.deleteWorkspaceAfterDestroy | quote }}
+            - name: MAX_SCHEDULE_DAYS
+              value: {{ .Values.maxScheduleDays | default 30 | quote }}
           readinessProbe:
             httpGet:
               path: /healthz

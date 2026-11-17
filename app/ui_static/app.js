@@ -69,6 +69,27 @@ const money = (value, currency = "USD") =>
   value == null ? "–" : new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: value < 1 ? 3 : 2 }).format(value);
 const when = (iso) => (iso ? new Date(iso).toLocaleString() : "–");
 
+// Value for <input type="datetime-local"> in the browser's time zone.
+function localInputValue(date) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+// Tomorrow 09:00 local time: a sensible first suggestion for a scheduled lab.
+function tomorrowMorning() {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  d.setHours(9, 0, 0, 0);
+  return d;
+}
+
+const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// "in 3 h 5 min" / "Starts in ..." for scheduled labs.
+function expiryText(lab) {
+  return lab.status === "scheduled" ? `starts ${untilText(lab.start_at)}` : untilText(lab.expires_at);
+}
+
 function untilText(iso) {
   const ms = new Date(iso) - Date.now();
   if (ms <= 0) return "expired";
@@ -134,10 +155,27 @@ async function newLabView(templateId) {
   const t = await api(`templates/${encodeURIComponent(templateId)}`);
   const estimate = h("div", { class: "estimate" }, "Estimating cost…");
   const ttl = h("input", { type: "number", name: "__ttl", min: 1, max: t.max_ttl_hours, value: t.default_ttl_hours });
+  const caseId = h("input", { type: "text", name: "__case", maxlength: 64, placeholder: "e.g. F-CS-1234567 or customer name" });
+  const startNow = h("input", { type: "radio", name: "__start", value: "now", checked: true });
+  const startLater = h("input", { type: "radio", name: "__start", value: "later" });
+  const startAt = h("input", { type: "datetime-local", name: "__start_at", value: localInputValue(tomorrowMorning()), disabled: true });
+  const syncStart = () => {
+    startAt.disabled = !startLater.checked;
+    startAt.required = startLater.checked;
+    submit.textContent = startLater.checked ? "Schedule lab" : "Create lab";
+  };
+  startNow.addEventListener("change", syncStart);
+  startLater.addEventListener("change", syncStart);
   const submit = h("button", { type: "submit" }, "Create lab");
   const form = h("form", { class: "lab-form" },
+    h("label", {}, "Case ID", caseId, h("small", {}, "The case or project this lab is for. Reports add up cost per case, across everyone working on it.")),
     t.inputs.map(inputField),
     h("label", {}, `Lifetime (hours, up to ${t.max_ttl_hours})`, ttl),
+    h("fieldset", { class: "start" },
+      h("legend", {}, "Start"),
+      h("label", { class: "check" }, startNow, "Now"),
+      h("label", { class: "check" }, startLater, "Later, at", startAt),
+      h("small", {}, `Your local time (${timeZone}). The workspace is prepared now; provisioning starts at this time and the lifetime counts from then.`)),
     estimate,
     h("div", { class: "actions" }, submit, h("a", { class: "button secondary", href: "#/catalog" }, "Cancel")));
 
@@ -160,8 +198,15 @@ async function newLabView(templateId) {
     event.preventDefault();
     submit.disabled = true;
     try {
-      const lab = await api("labs", { method: "POST", body: { template_id: t.id, ttl_hours: Number(ttl.value), inputs: readInputs(form, t) } });
-      toast(`Lab ${lab.name} is being created`);
+      const body = { template_id: t.id, ttl_hours: Number(ttl.value), inputs: readInputs(form, t) };
+      if (caseId.value.trim()) body.case_id = caseId.value.trim();
+      if (startLater.checked) {
+        const start = new Date(startAt.value);
+        if (Number.isNaN(start.getTime()) || start <= new Date()) throw new Error("Pick a start time in the future");
+        body.start_at = start.toISOString();
+      }
+      const lab = await api("labs", { method: "POST", body });
+      toast(lab.status === "scheduled" ? `Lab ${lab.name} scheduled for ${when(lab.start_at)}` : `Lab ${lab.name} is being created`);
       location.hash = `#/labs/${lab.id}`;
     } catch (error) {
       toast(error.message, true);
@@ -176,26 +221,36 @@ async function newLabView(templateId) {
 // ---- labs ------------------------------------------------------------------
 
 async function labsView() {
-  const history = new URLSearchParams(location.hash.split("?")[1]).has("history");
-  const { items } = await api(`labs${history ? "?include_destroyed=true" : ""}`);
+  const params = new URLSearchParams(location.hash.split("?")[1]);
+  const history = params.has("history");
+  const caseFilter = params.get("case");
+  const query = new URLSearchParams();
+  if (history) query.set("include_destroyed", "true");
+  if (caseFilter) query.set("case_id", caseFilter);
+  const { items } = await api(`labs${query.size ? `?${query}` : ""}`);
+  const listHash = (opts) => {
+    const q = [opts.history ? "history" : null, opts.case ? `case=${encodeURIComponent(opts.case)}` : null].filter(Boolean);
+    return `#/labs${q.length ? `?${q.join("&")}` : ""}`;
+  };
   crumbs([me.sees_all ? "Labs" : "My labs"]);
   const rows = items.map((l) =>
     h("tr", { class: "click", onclick: () => (location.hash = `#/labs/${l.id}`) },
-      h("td", {}, h("b", {}, l.name), h("div", { class: "note" }, l.template_id)),
+      h("td", {}, h("b", {}, l.name), h("div", { class: "note" }, l.template_id, l.case_id ? ` · case ${l.case_id}` : "")),
       me.sees_all ? h("td", {}, l.owner_email) : null,
       h("td", {}, badge(l.status)),
-      h("td", {}, l.status === "destroyed" ? when(l.destroyed_at) : untilText(l.expires_at)),
+      h("td", {}, l.status === "destroyed" ? when(l.destroyed_at) : expiryText(l)),
       h("td", {}, money(l.estimated_cost, l.currency || "USD"))));
   show(
     h("h1", {}, me.sees_all ? "Labs (all owners)" : "My labs"),
+    caseFilter ? h("p", { class: "subtitle" }, `Case ${caseFilter} · `, h("a", { href: listHash({ history }) }, "show all cases")) : null,
     h("div", { class: "actions" },
       h("a", { class: "button", href: "#/catalog" }, "New lab"),
-      h("a", { class: "button secondary", href: history ? "#/labs" : "#/labs?history" }, history ? "Hide destroyed" : "Show destroyed")),
+      h("a", { class: "button secondary", href: listHash({ history: !history, case: caseFilter }) }, history ? "Hide destroyed" : "Show destroyed")),
     items.length
       ? h("table", {}, h("tr", {}, h("th", {}, "Lab"), me.sees_all ? h("th", {}, "Owner") : null, h("th", {}, "Status"), h("th", {}, history ? "Expires / destroyed" : "Expires"), h("th", {}, "Cost so far")), rows)
       : h("p", { class: "muted" }, "No labs yet."),
   );
-  pollWhile(items.some((l) => !SETTLED.has(l.status)), () => route());
+  pollWhile(items.some((l) => !SETTLED.has(l.status) && !(l.status === "scheduled" && new Date(l.start_at) - Date.now() > 60000)), () => route());
 }
 
 async function act(path, body, message) {
@@ -257,7 +312,8 @@ async function labView(id) {
   const currency = lab.currency || "USD";
   // Auditors may view any lab; only its owner or an admin may act on it or read its access details.
   const canAct = me.admin || lab.owner_email === me.email;
-  const live = canAct && !["destroying", "destroyed"].includes(lab.status);
+  const live = canAct && !["destroying", "destroyed", "scheduled"].includes(lab.status);
+  const scheduled = lab.status === "scheduled";
   const tab = new URLSearchParams(location.hash.split("?")[1]).get("tab") || "overview";
   const hours = h("select", {}, [1, 2, 4, 8, 24].map((n) => h("option", { value: n }, `+${n} h`)));
   crumbs([me.sees_all ? "Labs" : "My labs", "#/labs"], [lab.name]);
@@ -266,8 +322,10 @@ async function labView(id) {
     h("dl", { class: "facts" },
       h("dt", {}, "Template"), h("dd", {}, lab.template_id),
       h("dt", {}, "Owner"), h("dd", {}, lab.owner_email),
+      h("dt", {}, "Case ID"), h("dd", {}, lab.case_id ? h("a", { href: `#/labs?case=${encodeURIComponent(lab.case_id)}` }, lab.case_id) : "–"),
       lab.status_detail && [h("dt", {}, "Detail"), h("dd", {}, lab.status_detail)],
       h("dt", {}, "Created"), h("dd", {}, when(lab.created_at)),
+      lab.start_at && [h("dt", {}, scheduled ? "Starts" : "Started"), h("dd", {}, scheduled ? `${when(lab.start_at)} (${untilText(lab.start_at)})` : when(lab.start_at))],
       h("dt", {}, "Ready"), h("dd", {}, when(lab.ready_at)),
       lab.status === "destroyed"
         ? [h("dt", {}, "Destroyed"), h("dd", {}, `${when(lab.destroyed_at)} (${lab.destroy_reason || "–"})`)]
@@ -276,17 +334,18 @@ async function labView(id) {
       h("dt", {}, "Inputs"), h("dd", {}, Object.entries(lab.inputs).map(([k, v]) => h("div", {}, `${k} = ${v}`))),
       lab.workspace_url && [h("dt", {}, "Terrakube"), h("dd", {}, h("a", { href: lab.workspace_url, target: "_blank", rel: "noopener" }, "Workspace and run logs"))]),
     h("div", { class: "actions" },
-      canAct && ["ready", "provisioning", "pending", "failed"].includes(lab.status)
+      canAct && ["scheduled", "ready", "provisioning", "pending", "failed"].includes(lab.status)
         ? [hours, h("button", { class: "secondary", onclick: () => act(`labs/${id}/extend`, { hours: Number(hours.value) }, "Lifetime extended") }, "Extend")]
         : null,
       canAct && lab.status === "failed" ? h("button", { class: "secondary", onclick: () => act(`labs/${id}/retry`, null, "Retrying") }, "Retry") : null,
-      live ? h("button", { class: "danger", onclick: () => confirm(`Destroy ${lab.name}? This cannot be undone.`) && act(`labs/${id}/destroy`, { reason: "requested in portal" }, "Destroying") }, "Destroy") : null),
+      live ? h("button", { class: "danger", onclick: () => confirm(`Destroy ${lab.name}? This cannot be undone.`) && act(`labs/${id}/destroy`, { reason: "requested in portal" }, "Destroying") }, "Destroy") : null,
+      canAct && scheduled ? h("button", { class: "danger", onclick: () => confirm(`Cancel ${lab.name}? It has not started; nothing was created yet.`) && act(`labs/${id}/destroy`, { reason: "cancelled in portal" }, "Cancelled") }, "Cancel lab") : null),
   ];
   const access = !canAct
     ? [h("p", { class: "muted" }, "Only the lab's owner and admins can see its access details.")]
     : lab.status === "ready"
     ? [accessBlock(lab), h("p", { class: "note" }, "Fetched only when you ask, and recorded in the lab's history.")]
-    : [h("p", { class: "muted" }, "Access details are available once the lab is ready.")];
+    : [h("p", { class: "muted" }, scheduled ? `Access details are available once the lab is ready; it starts ${when(lab.start_at)}.` : "Access details are available once the lab is ready.")];
   const history = h("ul", { class: "events" }, events.slice().reverse().map((e) =>
     h("li", {}, h("time", {}, when(e.at)), e.type.replaceAll("_", " "), e.actor ? ` · ${e.actor}` : "")));
   const panes = { overview, access, history };
@@ -295,18 +354,22 @@ async function labView(id) {
   show(
     h("h1", {}, lab.name),
     h("div", { class: "idline" }, `ID: ${lab.id}`, h("button", { class: "copy", title: "Copy ID", onclick: () => copy(lab.id) }, "⧉")),
-    h("p", { class: "subtitle" }, `${lab.template_id} for ${lab.owner_email}`),
+    h("p", { class: "subtitle" }, `${lab.template_id} for ${lab.owner_email}${lab.case_id ? `, case ${lab.case_id}` : ""}`),
     h("div", { class: "factsrow" },
       h("span", {}, badge(lab.status)),
       lab.status === "destroyed"
         ? h("span", {}, h("small", {}, "Destroyed"), when(lab.destroyed_at))
+        : scheduled
+        ? h("span", {}, h("small", {}, "Starts"), untilText(lab.start_at))
         : h("span", {}, h("small", {}, "Expires"), untilText(lab.expires_at)),
       h("span", {}, h("small", {}, "Cost so far"), money(lab.estimated_cost, currency)),
       h("span", {}, h("small", {}, "Hourly"), money(lab.estimated_hourly_cost, currency))),
     h("div", { class: "tabs" }, tabButton("overview", "Overview"), canAct ? tabButton("access", "Access") : null, tabButton("history", `History (${events.length})`)),
     panes[tab] || overview,
   );
-  pollWhile(!SETTLED.has(lab.status) && tab === "overview", () => route());
+  // Scheduled labs change state only at their start: poll from a minute before it.
+  const waiting = scheduled && new Date(lab.start_at) - Date.now() > 60000;
+  pollWhile(!SETTLED.has(lab.status) && !waiting && tab === "overview", () => route());
 }
 
 // ---- admin -----------------------------------------------------------------
@@ -321,11 +384,22 @@ async function reportsView() {
     h("div", { class: "actions" }, [7, 30, 90].map((d) => h("a", { class: `button ${d === days ? "" : "secondary"}`, href: `#/reports?days=${d}` }, `${d} days`))),
     h("div", { class: "stats" },
       stat(summary.active_labs, "active labs"),
+      stat(summary.scheduled_labs ?? 0, "scheduled"),
       stat(summary.needs_attention, "need attention"),
       stat(summary.created, "created"),
       stat(summary.expired, "expired"),
       stat(summary.provision_failures, "failed to provision"),
       stat(money(costs.estimated_cost, costs.currency), `estimated cost, ${costs.lab_hours.toFixed(1)} lab-hours`)),
+    h("h2", {}, "Cost per case"),
+    costs.cases.length
+      ? h("table", {},
+        h("tr", {}, h("th", {}, "Case ID"), h("th", {}, "People"), h("th", {}, "Labs"), h("th", {}, "Lab-hours"), h("th", {}, "Estimated cost")),
+        costs.cases.map((c) => h("tr", {},
+          h("td", {}, c.case_id ? h("a", { href: `#/labs?history&case=${encodeURIComponent(c.case_id)}` }, h("b", {}, c.case_id)) : h("span", { class: "muted" }, "(no case ID)"),
+            h("div", { class: "note" }, c.templates.map((t) => `${t.template_id} ${money(t.estimated_cost, costs.currency)}`).join(" · "))),
+          h("td", {}, c.owners.map((o) => h("div", {}, o))),
+          h("td", {}, c.labs), h("td", {}, c.lab_hours), h("td", {}, h("b", {}, money(c.estimated_cost, costs.currency))))))
+      : h("p", { class: "muted" }, "No labs in this period."),
     h("h2", {}, "Cost per owner"),
     h("table", {},
       h("tr", {}, h("th", {}, "Owner"), h("th", {}, "Template"), h("th", {}, "Labs"), h("th", {}, "Lab-hours"), h("th", {}, "Estimated cost")),

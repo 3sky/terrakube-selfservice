@@ -10,7 +10,7 @@ from uuid import UUID
 from .catalog import Catalog, public_inputs, resolve_inputs
 from .config import Settings
 from .db import RECONCILER_LOCK_ID, Database, NameTaken
-from .models import CostLine, CostReport, Estimate, EstimateRequest, Lab, LabCreate, LabStatus, OwnerCost
+from .models import CaseCost, CostLine, CostReport, Estimate, EstimateRequest, Lab, LabCreate, LabStatus, OwnerCost
 from .identity import Caller
 from .openbao import OpenBaoClient
 from .terrakube import JOB_FAILED, JOB_SUCCEEDED, Terrakube, WorkspaceGone
@@ -28,7 +28,9 @@ def random_name(owner_email: str) -> str:
     if not slug or not slug[0].isalpha():
         slug = f"lab-{slug}".rstrip("-")[:20].rstrip("-")
     return f"{slug}-{''.join(secrets.choice(_ALPHABET) for _ in range(5))}"
-LIVE = {LabStatus.pending, LabStatus.provisioning, LabStatus.ready, LabStatus.failed, LabStatus.destroy_failed}
+# A start this close to now is treated as "now" (clock skew, a slow form).
+SCHEDULE_SLACK = timedelta(minutes=2)
+LIVE = {LabStatus.scheduled, LabStatus.pending, LabStatus.provisioning, LabStatus.ready, LabStatus.failed, LabStatus.destroy_failed}
 
 
 class LabError(Exception):
@@ -43,9 +45,25 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
+def started_at(row: dict[str, Any]) -> datetime:
+    """When the lab's lifetime and cost start: its scheduled start, else its creation."""
+    return row.get("start_at") or row["created_at"]
+
+
 def tag_time(moment: datetime) -> str:
     """Compact UTC minute for tags, e.g. 2026-09-30T12:00Z."""
     return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ")
+
+
+def merge_line(lines: list[CostLine], item: CostLine) -> None:
+    """Add item to the line of the same template, or append it."""
+    for line in lines:
+        if line.template_id == item.template_id:
+            line.labs += item.labs
+            line.lab_hours = round(line.lab_hours + item.lab_hours, 2)
+            line.estimated_cost = round(line.estimated_cost + item.estimated_cost, 2)
+            return
+    lines.append(item.model_copy())
 
 
 class LabService:
@@ -62,7 +80,7 @@ class LabService:
         cost = None
         if hourly is not None:
             end = row["destroyed_at"] or now()
-            hours = max((end - row["created_at"]).total_seconds() / 3600, 0) if row["ready_at"] else 0
+            hours = max((end - started_at(row)).total_seconds() / 3600, 0) if row["ready_at"] else 0
             cost = round(hours * hourly, 2)
         return Lab.model_validate({
             **row, "inputs": public_inputs(template, row["inputs"]),
@@ -105,11 +123,20 @@ class LabService:
         lines = await self.db.cost_lines(moment - timedelta(days=days), moment)
         owners: dict[str, OwnerCost] = {}
         templates: dict[str, CostLine] = {}
+        cases: dict[str | None, CaseCost] = {}
         for line in lines:
             item = CostLine(**{k: line[k] for k in ("template_id", "labs", "lab_hours", "estimated_cost")})
+            case = cases.setdefault(line["case_id"], CaseCost(
+                case_id=line["case_id"], labs=0, lab_hours=0, estimated_cost=0, owners=[], templates=[]))
+            case.labs += item.labs
+            case.lab_hours = round(case.lab_hours + item.lab_hours, 2)
+            case.estimated_cost = round(case.estimated_cost + item.estimated_cost, 2)
+            if line["owner_email"] not in case.owners:
+                case.owners.append(line["owner_email"])
+            merge_line(case.templates, item)
             owner = owners.setdefault(line["owner_email"], OwnerCost(
                 owner_email=line["owner_email"], labs=0, lab_hours=0, estimated_cost=0, templates=[]))
-            owner.templates.append(item)
+            merge_line(owner.templates, item)
             owner.labs += item.labs
             owner.lab_hours = round(owner.lab_hours + item.lab_hours, 2)
             owner.estimated_cost = round(owner.estimated_cost + item.estimated_cost, 2)
@@ -119,6 +146,8 @@ class LabService:
             total.lab_hours = round(total.lab_hours + item.lab_hours, 2)
             total.estimated_cost = round(total.estimated_cost + item.estimated_cost, 2)
         by_cost = lambda x: (-x.estimated_cost, -x.lab_hours)  # noqa: E731
+        for group in (*owners.values(), *cases.values()):
+            group.templates.sort(key=by_cost)
         return CostReport(
             window_days=days,
             currency=self.catalog.currency,
@@ -127,10 +156,12 @@ class LabService:
             estimated_cost=round(sum(o.estimated_cost for o in owners.values()), 2),
             unpriced_labs=sum(line["unpriced"] for line in lines),
             owners=sorted(owners.values(), key=by_cost),
+            cases=sorted(cases.values(), key=by_cost),
             templates=sorted(templates.values(), key=by_cost),
             method=(
-                "List prices from the catalog times lab-hours. A lab's hours run from creation to destruction "
-                "(or now) within the window; only labs that reached ready are charged, at the hourly price "
+                "List prices from the catalog times lab-hours. A lab's hours run from creation (scheduled labs: "
+                "their start) to destruction (or now) within the window; only labs that reached ready are charged, "
+                "at the hourly price "
                 "snapshotted when they were created. Excludes taxes, transfer overage and resources a failed "
                 "run left behind."
             ),
@@ -176,14 +207,17 @@ class LabService:
 
         lab_id = uuid.uuid4()
         created = now()
+        start_at = self._check_start(request.start_at, created)
+        start = start_at or created
+        expires = start + timedelta(hours=ttl)
         priced = self.catalog.estimate(template, values)
         # Sensitive inputs (passwords) go to Terrakube as sensitive variables only;
         # the lab record keeps a placeholder.
         sensitive = {i.name for i in template.inputs if i.sensitive}
         stored = {k: ("***" if k in sensitive else v) for k, v in values.items()}
         name = await self._insert(
-            request, lab_id, template.id, stored, created, created + timedelta(hours=ttl), actor,
-            hourly_cost=priced[0] if priced else None,
+            request, lab_id, template.id, stored, created, expires, actor,
+            hourly_cost=priced[0] if priced else None, start_at=start_at,
         )
 
         workspace_id: str | None = None
@@ -191,7 +225,8 @@ class LabService:
         try:
             workspace_id = await self.terrakube.create_workspace(
                 name=f"lab-{name}",
-                description=f"{template.name} for {request.owner_email} (lab {lab_id})",
+                description=f"{template.name} for {request.owner_email}"
+                + (f", case {request.case_id}" if request.case_id else "") + f" (lab {lab_id})",
                 repository=template.source.repository,
                 branch=template.source.branch,
                 folder=template.source.folder,
@@ -213,14 +248,19 @@ class LabService:
                 "TF_VAR_lab_id": str(lab_id),
                 "TF_VAR_lab_name": name,
                 "TF_VAR_lab_owner": request.owner_email,
-                "TF_VAR_lab_expires_at": (created + timedelta(hours=ttl)).isoformat(),
+                "TF_VAR_lab_expires_at": expires.isoformat(),
             }
             for key, value in {**template.env, **metadata}.items():
                 await self.terrakube.add_variable(
                     workspace_id, key=key, value=value, category="ENV", sensitive=False, description="lab metadata",
                 )
-            await self._tag(workspace_id, {"lab_owner": request.owner_email,
-                                           "expires_at": tag_time(created + timedelta(hours=ttl))})
+            await self._tag(workspace_id, {"lab_owner": request.owner_email, "expires_at": tag_time(expires)})
+            if start_at is not None:
+                # Workspace and variables are ready; the reconciler queues the apply at start_at.
+                return await self.db.update_lab(
+                    lab_id, status=LabStatus.scheduled, status_detail=f"starts {start_at.isoformat()}",
+                    event=("scheduled", actor, {"workspace_id": workspace_id, "start_at": start_at.isoformat()}),
+                )
             job_id = await self.terrakube.start_job(workspace_id, self.settings.terrakube_apply_template)
         except Exception as error:
             log.exception("provisioning lab %s failed", lab_id)
@@ -235,9 +275,22 @@ class LabService:
             event=("provision_started", actor, {"workspace_id": workspace_id, "job_id": job_id}),
         )
 
+    def _check_start(self, start_at: datetime | None, created: datetime) -> datetime | None:
+        """The scheduled start, or None to start now (no start_at, or one that is about now)."""
+        if start_at is None:
+            return None
+        if start_at < created - SCHEDULE_SLACK:
+            raise LabError(422, "start_at is in the past")
+        if start_at <= created + SCHEDULE_SLACK:
+            return None
+        if start_at > created + timedelta(days=self.settings.max_schedule_days):
+            raise LabError(422, f"start_at must be within {self.settings.max_schedule_days} days")
+        return start_at.astimezone(UTC)
+
     async def _insert(
         self, request: LabCreate, lab_id: UUID, template_id: str, values: dict[str, str],
         created_at: datetime, expires_at: datetime, actor: str | None, hourly_cost: float | None = None,
+        start_at: datetime | None = None,
     ) -> str:
         """Record the lab; a generated name is retried on the rare collision."""
         attempts = 1 if request.name else NAME_ATTEMPTS
@@ -248,6 +301,7 @@ class LabService:
                     lab_id=lab_id, name=name, template_id=template_id, owner_email=request.owner_email,
                     inputs=values, created_at=created_at, expires_at=expires_at, actor=actor,
                     hourly_cost=hourly_cost, currency=self.catalog.currency if hourly_cost is not None else None,
+                    case_id=request.case_id, start_at=start_at,
                 )
                 return name
             except NameTaken:
@@ -285,11 +339,12 @@ class LabService:
     async def extend(self, lab_id: UUID, hours: int, caller: Caller) -> dict[str, Any]:
         row = await self.get_owned(lab_id, caller)
         actor = caller.email
-        if row["status"] not in {LabStatus.pending, LabStatus.provisioning, LabStatus.ready, LabStatus.failed}:
+        if row["status"] not in {LabStatus.scheduled, LabStatus.pending, LabStatus.provisioning, LabStatus.ready,
+                                 LabStatus.failed}:
             raise LabError(409, f"cannot extend a lab in status {row['status']}")
         template = self.catalog.get(row["template_id"])
         max_hours = template.max_ttl_hours if template else 0
-        limit = row["created_at"] + timedelta(hours=max_hours)
+        limit = started_at(row) + timedelta(hours=max_hours)
         target = min(max(row["expires_at"], now()) + timedelta(hours=hours), limit)
         if target <= row["expires_at"]:
             raise LabError(409, f"lab already at its maximum lifetime ({max_hours}h, until {limit.isoformat()})")
@@ -307,7 +362,27 @@ class LabService:
         row = await self.get_owned(lab_id, caller)
         if row["status"] in {LabStatus.destroying, LabStatus.destroyed}:
             raise LabError(409, f"lab is already {row['status']}")
+        if row["status"] == LabStatus.scheduled:
+            return await self._cancel(row, caller.email, reason)
         return await self._start_destroy(row, caller.email, reason)
+
+    async def _cancel(self, row: dict[str, Any], actor: str, reason: str) -> dict[str, Any]:
+        """A scheduled lab never ran: drop it and its empty workspace, no destroy job needed."""
+        detail = "cancelled before it started"
+        if row["workspace_id"] and self.settings.delete_workspace_after_destroy:
+            try:
+                await self.terrakube.delete_workspace(row["workspace_id"])
+            except Exception as error:
+                log.warning("deleting workspace of cancelled lab %s failed", row["id"], exc_info=True)
+                detail = f"cancelled before it started; workspace delete failed: {error}"[:500]
+        updated = await self.db.update_lab(
+            row["id"], expect_status={LabStatus.scheduled}, status=LabStatus.destroyed, destroyed_at=now(),
+            destroy_requested_at=now(), destroy_reason=reason, status_detail=detail,
+            event=("cancelled", actor, {"reason": reason, "start_at": row["start_at"].isoformat()}),
+        )
+        if updated is None:
+            raise LabError(409, "lab started while cancelling; destroy it instead")
+        return updated
 
     async def retry(self, lab_id: UUID, caller: Caller) -> dict[str, Any]:
         """Run the apply again for a failed lab, e.g. after fixing its template or a permission."""
@@ -397,11 +472,37 @@ class LabService:
             if not await self.db.try_reconciler_lock(conn):
                 return
             try:
+                await self._start_due()
                 await self._follow_jobs()
                 await self._fail_stuck_pending()
                 await self._expire()
             finally:
                 await conn.execute("SELECT pg_advisory_unlock(%s)", (RECONCILER_LOCK_ID,))
+
+    async def _start_due(self) -> None:
+        """Queue the apply of scheduled labs whose start time has come."""
+        for row in await self.db.due_scheduled_labs(now()):
+            started = now()
+            try:
+                job_id = await self.terrakube.start_job(row["workspace_id"], self.settings.terrakube_apply_template)
+            except Exception as error:
+                log.exception("starting scheduled lab %s failed", row["id"])
+                await self.db.update_lab(
+                    row["id"], expect_status={LabStatus.scheduled}, status=LabStatus.failed, start_at=started,
+                    status_detail=f"scheduled start failed: {error}"[:500],
+                    event=("provision_failed", TTL_POLICY, {"stage": "scheduled-start", "error": str(error)[:500]}),
+                )
+                continue
+            # A late start (service was down) keeps the planned lifetime length.
+            expires = row["expires_at"] + max(started - row["start_at"], timedelta(0))
+            await self.db.update_lab(
+                row["id"], expect_status={LabStatus.scheduled}, status=LabStatus.provisioning, job_id=job_id,
+                start_at=started, expires_at=expires, status_detail="apply job queued",
+                event=("provision_started", TTL_POLICY, {"workspace_id": row["workspace_id"], "job_id": job_id,
+                                                         "scheduled_for": row["start_at"].isoformat()}),
+            )
+            if expires != row["expires_at"]:
+                await self._tag(row["workspace_id"], {"expires_at": tag_time(expires)})
 
     async def _follow_jobs(self) -> None:
         for row in await self.db.labs_in_status({LabStatus.provisioning, LabStatus.destroying}):

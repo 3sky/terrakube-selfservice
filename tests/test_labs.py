@@ -1,5 +1,5 @@
 import dataclasses
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from conftest import ADMIN, AUDITOR, BOB, CATALOG, age
@@ -513,3 +513,139 @@ async def test_me_reports_the_callers_role(env):
         "email": "alice@example.com", "role": "user", "admin": False, "sees_all": False}
     assert (await client.get("/v1/me", headers=AUDITOR)).json()["sees_all"] is True
     assert (await client.get("/v1/me", headers=ADMIN)).json()["admin"] is True
+
+
+# --- case IDs ----------------------------------------------------------------
+
+
+async def test_case_id_is_stored_filtered_and_reported(env):
+    client, service, terrakube = env
+    lab = (await client.post("/v1/labs", json={**NEW_LAB, "case_id": "  F-CS-1234  "})).json()
+    assert lab["case_id"] == "F-CS-1234"
+    assert "case F-CS-1234" in terrakube.workspaces["ws-1"]["description"]
+    bob = {**NEW_LAB, "name": "bob-lab", "owner_email": "bob@example.com", "case_id": "F-CS-1234"}
+    assert (await client.post("/v1/labs", json=bob, headers=BOB)).status_code == 202
+    other = {**NEW_LAB, "name": "no-case-lab"}
+    assert (await client.post("/v1/labs", json=other)).status_code == 202
+    for job in terrakube.jobs.values():
+        job["status"] = "completed"
+    await service.reconcile()
+    for row in await service.db.list_labs(owner=None, status=None, template_id=None, include_destroyed=True, limit=10):
+        await age(service.db, row["id"], 10)
+
+    listed = (await client.get("/v1/labs?case_id=F-CS-1234", headers=ADMIN)).json()["items"]
+    assert {l["name"] for l in listed} == {"acme-repro", "bob-lab"}
+
+    report = (await client.get("/v1/analytics/costs?days=30", headers=ADMIN)).json()
+    case, none = report["cases"]
+    assert case["case_id"] == "F-CS-1234" and case["labs"] == 2
+    assert sorted(case["owners"]) == ["alice@example.com", "bob@example.com"]
+    assert case["estimated_cost"] == round(2 * 10 * 0.051, 2)
+    assert case["templates"] == [{"template_id": "aws-lab", "labs": 2, "lab_hours": 20.0, "estimated_cost": 1.02}]
+    assert none["case_id"] is None and none["labs"] == 1
+    # Splitting by case does not split the per-owner template lines.
+    alice = next(o for o in report["owners"] if o["owner_email"] == "alice@example.com")
+    assert alice["templates"] == [{"template_id": "aws-lab", "labs": 2, "lab_hours": 20.0, "estimated_cost": 1.02}]
+
+
+async def test_case_id_rejects_control_characters_and_long_values(env):
+    client, _, _ = env
+    assert (await client.post("/v1/labs", json={**NEW_LAB, "case_id": "a\nb"})).status_code == 422
+    assert (await client.post("/v1/labs", json={**NEW_LAB, "case_id": "x" * 65})).status_code == 422
+
+
+# --- scheduled labs ----------------------------------------------------------
+
+
+def _in(hours: float) -> str:
+    return (datetime.now(UTC) + timedelta(hours=hours)).isoformat()
+
+
+async def _due(database, lab_id: str, hours_ago: float = 0) -> None:
+    """Move a scheduled lab's start (and expiry) so its start has come."""
+    async with database.pool.connection() as conn:
+        await conn.execute(
+            "UPDATE labs SET expires_at = expires_at - (start_at - %(at)s), start_at = %(at)s WHERE id = %(id)s",
+            {"at": datetime.now(UTC) - timedelta(hours=hours_ago), "id": lab_id},
+        )
+
+
+async def test_scheduled_lab_prepares_workspace_and_starts_later(env):
+    client, service, terrakube = env
+    start = _in(14)
+    response = await client.post("/v1/labs", json={**NEW_LAB, "start_at": start, "ttl_hours": 8})
+    assert response.status_code == 202
+    lab = response.json()
+    assert lab["status"] == "scheduled" and lab["job_id"] is None
+    assert datetime.fromisoformat(lab["start_at"]) == datetime.fromisoformat(start)
+    # Lifetime counts from the start, not from booking.
+    assert datetime.fromisoformat(lab["expires_at"]) - datetime.fromisoformat(lab["start_at"]) == timedelta(hours=8)
+    assert terrakube.workspaces["ws-1"]["variables"] and terrakube.jobs == {}
+    assert lab["estimated_cost"] == 0
+
+    await service.reconcile()  # not due yet
+    assert (await client.get(f"/v1/labs/{lab['id']}")).json()["status"] == "scheduled"
+    summary = (await client.get("/v1/analytics/summary", headers=ADMIN)).json()
+    assert summary["scheduled_labs"] == 1 and summary["active_labs"] == 0
+
+    await _due(service.db, lab["id"])
+    await service.reconcile()
+    started = (await client.get(f"/v1/labs/{lab['id']}")).json()
+    assert started["status"] == "provisioning" and started["job_id"] == "job-1"
+    assert terrakube.jobs["job-1"]["template"] == "Plan and apply"
+    events = [e["type"] for e in (await client.get(f"/v1/labs/{lab['id']}/events")).json()["items"]]
+    assert events == ["created", "scheduled", "provision_started"]
+
+
+async def test_late_start_keeps_the_lifetime_length(env):
+    client, service, _ = env
+    lab = (await client.post("/v1/labs", json={**NEW_LAB, "start_at": _in(3), "ttl_hours": 8})).json()
+    await _due(service.db, lab["id"], hours_ago=2)  # service was down for two hours
+    await service.reconcile()
+    started = (await client.get(f"/v1/labs/{lab['id']}")).json()
+    lifetime = datetime.fromisoformat(started["expires_at"]) - datetime.fromisoformat(started["start_at"])
+    assert round(lifetime.total_seconds() / 3600, 1) == 8
+
+
+async def test_scheduled_start_failure_marks_lab_failed(env):
+    client, service, terrakube = env
+    lab = (await client.post("/v1/labs", json={**NEW_LAB, "start_at": _in(3)})).json()
+    terrakube.deleted_outside.add("ws-1")
+    await _due(service.db, lab["id"])
+    await service.reconcile()
+    failed = (await client.get(f"/v1/labs/{lab['id']}")).json()
+    assert failed["status"] == "failed" and failed["status_detail"].startswith("scheduled start failed")
+
+
+async def test_cancel_scheduled_lab(env):
+    client, _, terrakube = env
+    lab = (await client.post("/v1/labs", json={**NEW_LAB, "start_at": _in(20)})).json()
+    assert (await client.post(f"/v1/labs/{lab['id']}/destroy", headers=BOB)).status_code == 404
+    response = await client.post(f"/v1/labs/{lab['id']}/destroy", json={"reason": "not needed"})
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "destroyed" and body["destroy_reason"] == "not needed"
+    assert terrakube.jobs == {} and terrakube.deleted == ["ws-1"]
+    # The name is free again.
+    assert (await client.post("/v1/labs", json=NEW_LAB)).status_code == 202
+
+
+async def test_schedule_validation(env):
+    client, _, terrakube = env
+    assert (await client.post("/v1/labs", json={**NEW_LAB, "start_at": _in(-1)})).status_code == 422
+    too_far = await client.post("/v1/labs", json={**NEW_LAB, "start_at": _in(31 * 24)})
+    assert too_far.status_code == 422 and "30 days" in too_far.json()["detail"]
+    naive = await client.post("/v1/labs", json={**NEW_LAB, "start_at": "2030-01-01T10:00:00"})
+    assert naive.status_code == 422
+    # A start within a minute or two is "now".
+    now_ish = (await client.post("/v1/labs", json={**NEW_LAB, "start_at": _in(0.01)})).json()
+    assert now_ish["status"] == "provisioning" and now_ish["start_at"] is None
+    assert terrakube.jobs
+
+
+async def test_extend_scheduled_lab_counts_max_ttl_from_start(env):
+    client, _, _ = env
+    lab = (await client.post("/v1/labs", json={**NEW_LAB, "start_at": _in(24)})).json()
+    body = (await client.post(f"/v1/labs/{lab['id']}/extend", json={"hours": 100})).json()
+    lifetime = datetime.fromisoformat(body["expires_at"]) - datetime.fromisoformat(body["start_at"])
+    assert round(lifetime.total_seconds() / 3600) == 48

@@ -50,11 +50,14 @@ own session (header mode). Call the service from the portal backend only, never 
 **Roles.** `user`: own labs only (another user's lab answers `404`). `auditor`: also reads every lab and the
 analytics, but cannot act on other people's labs or read their access details (`403`). `admin`: everything.
 
-**Lifecycle.** `pending` → `provisioning` → `ready` or `failed` → `destroying` → `destroyed` or `destroy_failed`.
+**Lifecycle.** (`scheduled` →) `pending` → `provisioning` → `ready` or `failed` → `destroying` → `destroyed` or
+`destroy_failed`. A lab created with `start_at` waits in `scheduled` until then.
 Poll a lab every 15-30 s while it is `pending` or `provisioning`.
 
 **Lifetimes.** Labs expire at `expires_at` and are destroyed automatically; `extend` adds hours up to the
-template's `max_ttl_hours` from creation.
+template's `max_ttl_hours` from creation (scheduled labs: from their start).
+
+**Cases.** `case_id` is free text naming the case a lab is for; `GET /analytics/costs` groups cost by it.
 
 Integration guide: https://github.com/3sky/terrakube-selfservice/blob/main/docs/portal-integration.md
 """.strip()
@@ -164,7 +167,7 @@ def build_app(
 
     app = FastAPI(
         title="Terrakube Self-Service",
-        version="0.7.3",
+        version="0.8.0",
         description=API_DESCRIPTION,
         openapi_tags=OPENAPI_TAGS,
         lifespan=lifespan,
@@ -236,7 +239,11 @@ def build_app(
         @router.post("/labs", response_model=Lab, status_code=status.HTTP_202_ACCEPTED, dependencies=deps, tags=["labs"],
                   summary="Create a lab from a template", responses=errors(403, 409, 422, 502))
         async def create_lab(body: LabCreate, svc: Service, caller: User) -> Lab:
-            """Creates the Terrakube workspace and queues its apply. Poll the lab until `ready` or `failed`."""
+            """Creates the Terrakube workspace and queues its apply. Poll the lab until `ready` or `failed`.
+
+            With `start_at` the lab is `scheduled`: the workspace is created now and the apply is queued at
+            `start_at`. Destroying a scheduled lab cancels it.
+            """
             return svc.to_model(await svc.create(body, caller))
 
         @router.get("/labs", response_model=LabList, dependencies=deps, tags=["labs"], summary="List labs",
@@ -247,12 +254,13 @@ def build_app(
             owner_email: Annotated[str | None, Query(description="Auditors and admins; users always see their own labs.")] = None,
             lab_status: Annotated[LabStatus | None, Query(alias="status")] = None,
             template_id: str | None = None,
+            case_id: Annotated[str | None, Query(max_length=64, description="Only labs of this case.")] = None,
             include_destroyed: bool = False,
             limit: Annotated[int, Query(ge=1, le=500)] = 100,
         ) -> LabList:
             owner = (owner_email.lower() if owner_email else None) if caller.sees_all else caller.email
             rows = await svc.db.list_labs(
-                owner=owner, status=lab_status, template_id=template_id,
+                owner=owner, status=lab_status, template_id=template_id, case_id=case_id,
                 include_destroyed=include_destroyed or lab_status == LabStatus.destroyed, limit=limit,
             )
             return LabList(items=[svc.to_model(r) for r in rows])
@@ -287,7 +295,10 @@ def build_app(
         @router.post("/labs/{lab_id}/destroy", response_model=Lab, status_code=status.HTTP_202_ACCEPTED,
                   dependencies=deps, tags=["labs"], summary="Destroy a lab now", responses=errors(403, 404, 409, 502))
         async def destroy_lab(lab_id: UUID, svc: Service, caller: User, body: DestroyRequest | None = None) -> Lab:
-            """Queues a destroy job; the workspace is deleted once it completes. Also retries a `destroy_failed` lab."""
+            """Queues a destroy job; the workspace is deleted once it completes. Also retries a `destroy_failed` lab.
+
+            A `scheduled` lab is cancelled at once (`destroyed`, no destroy job).
+            """
             reason = (body.reason if body and body.reason else None) or "requested"
             return svc.to_model(await svc.destroy(lab_id, caller, reason))
 

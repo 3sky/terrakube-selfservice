@@ -2,6 +2,12 @@
 
 Image `ghcr.io/3sky/terrakube-selfservice` and chart `oci://ghcr.io/3sky/charts/terrakube-selfservice` share these versions.
 
+## 0.8.0
+
+- **Case IDs.** `case_id` on `POST /v1/labs`: free text naming the case or project a lab is for. Labs return it, `GET /v1/labs?case_id=` filters by it, and `GET /v1/analytics/costs` adds `cases`: lab-hours and estimated cost per case across everyone who worked on it, split by template. The portal has a Case ID field and a "Cost per case" report.
+- **Scheduled labs.** `start_at` on `POST /v1/labs` (ISO 8601 with a time zone, up to `MAX_SCHEDULE_DAYS`/`maxScheduleDays`, default 30, ahead). The lab is `scheduled`: its workspace and variables are created at once, and the reconciler queues the apply at `start_at`. Lifetime, `max_ttl_hours` and cost count from the start; a late start (service down) keeps the planned lifetime length. Destroying a scheduled lab cancels it without a destroy job. `GET /v1/analytics/summary` adds `scheduled_labs`; scheduled labs are not counted as active. The portal's form has "Start: now / later, at" in the user's local time.
+- Database: columns `labs.case_id` and `labs.start_at`, added on startup.
+
 ## 0.7.3
 
 - `GET /v1/me`: the calling user's email and role (`user`, `auditor`, `admin`), so an external portal can show or hide admin and report screens. The built-in portal's `/ui/api/me` now uses the same code.

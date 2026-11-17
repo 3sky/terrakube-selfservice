@@ -87,6 +87,9 @@ class Settings:
     pending_timeout_minutes: int
     delete_workspace_after_destroy: bool
 
+    # How far ahead a lab may be scheduled (start_at).
+    max_schedule_days: int = 30
+
     # Users: admins see and act on every lab and read analytics. With
     # USER_TOKEN_ISSUER set, users are identified by a verified OIDC token
     # (X-User-Token) instead of the X-Actor-Email header.
@@ -170,6 +173,7 @@ class Settings:
             reconcile_interval_seconds=int(os.environ.get("RECONCILE_INTERVAL_SECONDS", "30")),
             pending_timeout_minutes=int(os.environ.get("PENDING_TIMEOUT_MINUTES", "10")),
             delete_workspace_after_destroy=_bool(os.environ.get("DELETE_WORKSPACE_AFTER_DESTROY"), True),
+            max_schedule_days=int(os.environ.get("MAX_SCHEDULE_DAYS", "30")),
             admin_emails=tuple(e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()),
             auditor_emails=tuple(e.strip().lower() for e in os.environ.get("AUDITOR_EMAILS", "").split(",") if e.strip()),
             user_token_issuer=(os.environ.get("USER_TOKEN_ISSUER") or "").rstrip("/") or None,

@@ -9,9 +9,12 @@ InputValue = str | int | float | bool
 
 NAME_PATTERN = r"^[a-z][a-z0-9-]{2,30}[a-z0-9]$"
 EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+# Free text naming the support case or project a lab is for; no control characters.
+CASE_ID_PATTERN = r"^[^\x00-\x1f\x7f]{1,64}$"
 
 
 class LabStatus(StrEnum):
+    scheduled = "scheduled"
     pending = "pending"
     provisioning = "provisioning"
     ready = "ready"
@@ -151,6 +154,23 @@ class LabCreate(BaseModel):
     )
     ttl_hours: int | None = Field(default=None, gt=0, description="Defaults to the template's default_ttl_hours.")
     inputs: dict[str, InputValue] = {}
+    case_id: str | None = Field(
+        default=None, pattern=CASE_ID_PATTERN,
+        description="Free text (up to 64 characters): the case or project the lab is for. Reports group cost by it.",
+    )
+    start_at: datetime | None = Field(
+        default=None,
+        description="Schedule the lab: when to start provisioning, with a time zone (ISO 8601). Omit to start now. "
+        "The workspace is created at once; the apply runs at start_at, and the lifetime counts from then.",
+    )
+
+    @model_validator(mode="after")
+    def _clean(self) -> "LabCreate":
+        if self.case_id is not None:
+            self.case_id = self.case_id.strip() or None
+        if self.start_at is not None and self.start_at.tzinfo is None:
+            raise ValueError("start_at needs a time zone, e.g. 2026-11-18T10:00:00+01:00")
+        return self
 
 
 class Lab(BaseModel):
@@ -158,10 +178,14 @@ class Lab(BaseModel):
     name: str
     template_id: str
     owner_email: str
+    case_id: str | None = None
     status: LabStatus
     status_detail: str | None = None
     inputs: dict[str, Any]
     created_at: datetime
+    start_at: datetime | None = Field(
+        default=None, description="Scheduled labs: when provisioning starts (planned) or started. Null: at creation.",
+    )
     ready_at: datetime | None = None
     expires_at: datetime
     destroy_requested_at: datetime | None = None
@@ -171,7 +195,8 @@ class Lab(BaseModel):
     currency: str | None = None
     estimated_hourly_cost: float | None = Field(default=None, description="Snapshot taken at creation.")
     estimated_cost: float | None = Field(
-        default=None, description="Cost so far: hourly × hours from creation to destruction (or now); 0 if never ready.",
+        default=None,
+        description="Cost so far: hourly × hours from start (creation, or start_at) to destruction (or now); 0 if never ready.",
     )
     workspace_id: str | None = None
     workspace_url: str | None = None
@@ -217,6 +242,15 @@ class OwnerCost(BaseModel):
     templates: list[CostLine]
 
 
+class CaseCost(BaseModel):
+    case_id: str | None = Field(description="Null: labs created without a case ID.")
+    labs: int
+    lab_hours: float
+    estimated_cost: float
+    owners: list[str] = Field(description="Everyone who ran labs for this case in the window.")
+    templates: list[CostLine]
+
+
 class CostReport(BaseModel):
     window_days: int
     currency: str
@@ -225,6 +259,7 @@ class CostReport(BaseModel):
     estimated_cost: float
     unpriced_labs: int = Field(description="Labs that ran but have no price (template without a cost model).")
     owners: list[OwnerCost]
+    cases: list[CaseCost] = Field(description="Cost per case ID, most expensive first.")
     templates: list[CostLine]
     method: str
 
@@ -284,6 +319,7 @@ class OwnerStats(BaseModel):
 class AnalyticsSummary(BaseModel):
     window_days: int
     active_labs: int = Field(description="Labs pending, provisioning, ready or failed (not yet destroyed).")
+    scheduled_labs: int = Field(default=0, description="Labs waiting for their start_at; they hold no resources yet.")
     needs_attention: int = Field(description="Labs in destroy_failed: cleanup needs a person.")
     by_status: dict[str, int]
     created: int

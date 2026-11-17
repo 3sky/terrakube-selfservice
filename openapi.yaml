@@ -27,8 +27,10 @@ info:
     (`403`). `admin`: everything.
 
 
-    **Lifecycle.** `pending` → `provisioning` → `ready` or `failed` → `destroying`
-    → `destroyed` or `destroy_failed`.
+    **Lifecycle.** (`scheduled` →) `pending` → `provisioning` → `ready` or `failed`
+    → `destroying` → `destroyed` or
+
+    `destroy_failed`. A lab created with `start_at` waits in `scheduled` until then.
 
     Poll a lab every 15-30 s while it is `pending` or `provisioning`.
 
@@ -36,11 +38,15 @@ info:
     **Lifetimes.** Labs expire at `expires_at` and are destroyed automatically; `extend`
     adds hours up to the
 
-    template''s `max_ttl_hours` from creation.
+    template''s `max_ttl_hours` from creation (scheduled labs: from their start).
+
+
+    **Cases.** `case_id` is free text naming the case a lab is for; `GET /analytics/costs`
+    groups cost by it.
 
 
     Integration guide: https://github.com/3sky/terrakube-selfservice/blob/main/docs/portal-integration.md'
-  version: 0.7.3
+  version: 0.8.0
 paths:
   /v1/me:
     get:
@@ -208,8 +214,14 @@ paths:
       tags:
       - labs
       summary: Create a lab from a template
-      description: Creates the Terrakube workspace and queues its apply. Poll the
+      description: 'Creates the Terrakube workspace and queues its apply. Poll the
         lab until `ready` or `failed`.
+
+
+        With `start_at` the lab is `scheduled`: the workspace is created now and the
+        apply is queued at
+
+        `start_at`. Destroying a scheduled lab cancels it.'
       operationId: create_lab
       security:
       - HTTPBearer: []
@@ -315,6 +327,17 @@ paths:
           - type: string
           - type: 'null'
           title: Template Id
+      - name: case_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            maxLength: 64
+          - type: 'null'
+          description: Only labs of this case.
+          title: Case Id
+        description: Only labs of this case.
       - name: include_destroyed
         in: query
         required: false
@@ -707,8 +730,11 @@ paths:
       tags:
       - labs
       summary: Destroy a lab now
-      description: Queues a destroy job; the workspace is deleted once it completes.
+      description: 'Queues a destroy job; the workspace is deleted once it completes.
         Also retries a `destroy_failed` lab.
+
+
+        A `scheduled` lab is cancelled at once (`destroyed`, no destroy job).'
       operationId: destroy_lab
       security:
       - HTTPBearer: []
@@ -1074,6 +1100,11 @@ components:
           type: integer
           title: Active Labs
           description: Labs pending, provisioning, ready or failed (not yet destroyed).
+        scheduled_labs:
+          type: integer
+          title: Scheduled Labs
+          description: Labs waiting for their start_at; they hold no resources yet.
+          default: 0
         needs_attention:
           type: integer
           title: Needs Attention
@@ -1133,6 +1164,43 @@ components:
       - window_days
       - points
       title: AnalyticsTimeseries
+    CaseCost:
+      properties:
+        case_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Case Id
+          description: 'Null: labs created without a case ID.'
+        labs:
+          type: integer
+          title: Labs
+        lab_hours:
+          type: number
+          title: Lab Hours
+        estimated_cost:
+          type: number
+          title: Estimated Cost
+        owners:
+          items:
+            type: string
+          type: array
+          title: Owners
+          description: Everyone who ran labs for this case in the window.
+        templates:
+          items:
+            $ref: '#/components/schemas/CostLine'
+          type: array
+          title: Templates
+      type: object
+      required:
+      - case_id
+      - labs
+      - lab_hours
+      - estimated_cost
+      - owners
+      - templates
+      title: CaseCost
     CostItem:
       properties:
         label:
@@ -1193,6 +1261,12 @@ components:
             $ref: '#/components/schemas/OwnerCost'
           type: array
           title: Owners
+        cases:
+          items:
+            $ref: '#/components/schemas/CaseCost'
+          type: array
+          title: Cases
+          description: Cost per case ID, most expensive first.
         templates:
           items:
             $ref: '#/components/schemas/CostLine'
@@ -1210,6 +1284,7 @@ components:
       - estimated_cost
       - unpriced_labs
       - owners
+      - cases
       - templates
       - method
       title: CostReport
@@ -1369,6 +1444,11 @@ components:
         owner_email:
           type: string
           title: Owner Email
+        case_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Case Id
         status:
           $ref: '#/components/schemas/LabStatus'
         status_detail:
@@ -1384,6 +1464,14 @@ components:
           type: string
           format: date-time
           title: Created At
+        start_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Start At
+          description: 'Scheduled labs: when provisioning starts (planned) or started.
+            Null: at creation.'
         ready_at:
           anyOf:
           - type: string
@@ -1430,8 +1518,8 @@ components:
           - type: number
           - type: 'null'
           title: Estimated Cost
-          description: 'Cost so far: hourly × hours from creation to destruction (or
-            now); 0 if never ready.'
+          description: 'Cost so far: hourly × hours from start (creation, or start_at)
+            to destruction (or now); 0 if never ready.'
         workspace_id:
           anyOf:
           - type: string
@@ -1519,6 +1607,23 @@ components:
           type: object
           title: Inputs
           default: {}
+        case_id:
+          anyOf:
+          - type: string
+            pattern: ^[^\x00-\x1f\x7f]{1,64}$
+          - type: 'null'
+          title: Case Id
+          description: 'Free text (up to 64 characters): the case or project the lab
+            is for. Reports group cost by it.'
+        start_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Start At
+          description: 'Schedule the lab: when to start provisioning, with a time
+            zone (ISO 8601). Omit to start now. The workspace is created at once;
+            the apply runs at start_at, and the lifetime counts from then.'
       additionalProperties: false
       type: object
       required:
@@ -1579,6 +1684,7 @@ components:
     LabStatus:
       type: string
       enum:
+      - scheduled
       - pending
       - provisioning
       - ready

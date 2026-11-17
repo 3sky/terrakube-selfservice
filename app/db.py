@@ -54,6 +54,12 @@ CREATE TABLE IF NOT EXISTS ui_sessions (
     expires_at timestamptz NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ui_sessions_expires_at ON ui_sessions (expires_at);
+
+-- 0.8.0: case IDs for cost attribution, and scheduled labs. start_at is set
+-- only for scheduled labs: the planned start, then the actual one.
+ALTER TABLE labs ADD COLUMN IF NOT EXISTS case_id text;
+ALTER TABLE labs ADD COLUMN IF NOT EXISTS start_at timestamptz;
+CREATE INDEX IF NOT EXISTS labs_case_id ON labs (case_id);
 """
 
 # Only one replica runs the reconciler at a time.
@@ -90,6 +96,7 @@ class Database:
         self, *, lab_id: UUID, name: str, template_id: str, owner_email: str,
         inputs: dict[str, str], created_at: datetime, expires_at: datetime, actor: str | None,
         hourly_cost: float | None = None, currency: str | None = None,
+        case_id: str | None = None, start_at: datetime | None = None,
     ) -> dict[str, Any]:
         """created_at comes from the service's clock, like every other lab timestamp."""
         from psycopg.errors import UniqueViolation
@@ -99,18 +106,22 @@ class Database:
                 row = await (await conn.execute(
                     """
                     INSERT INTO labs (id, name, template_id, owner_email, inputs, status, created_at, expires_at,
-                                      hourly_cost, currency)
+                                      hourly_cost, currency, case_id, start_at)
                     VALUES (%(id)s, %(name)s, %(template_id)s, %(owner)s, %(inputs)s, 'pending', %(created_at)s,
-                            %(expires_at)s, %(hourly_cost)s, %(currency)s)
+                            %(expires_at)s, %(hourly_cost)s, %(currency)s, %(case_id)s, %(start_at)s)
                     RETURNING *
                     """,
                     {"id": lab_id, "name": name, "template_id": template_id, "owner": owner_email,
                      "inputs": Jsonb(inputs), "created_at": created_at, "expires_at": expires_at, "hourly_cost": hourly_cost,
-                     "currency": currency},
+                     "currency": currency, "case_id": case_id, "start_at": start_at},
                 )).fetchone()
                 await conn.execute(
                     "INSERT INTO lab_events (lab_id, type, actor, details) VALUES (%s, 'created', %s, %s)",
-                    (lab_id, actor or owner_email, Jsonb({"template_id": template_id, "expires_at": expires_at.isoformat()})),
+                    (lab_id, actor or owner_email, Jsonb({
+                        "template_id": template_id, "expires_at": expires_at.isoformat(),
+                        **({"case_id": case_id} if case_id else {}),
+                        **({"start_at": start_at.isoformat()} if start_at else {}),
+                    })),
                 )
                 return row
         except UniqueViolation as error:
@@ -121,7 +132,7 @@ class Database:
 
     async def list_labs(
         self, *, owner: str | None, status: str | None, template_id: str | None,
-        include_destroyed: bool, limit: int,
+        include_destroyed: bool, limit: int, case_id: str | None = None,
     ) -> list[dict[str, Any]]:
         return await self._all(
             """
@@ -129,11 +140,13 @@ class Database:
             WHERE (%(owner)s::text IS NULL OR owner_email = %(owner)s)
               AND (%(status)s::text IS NULL OR status = %(status)s)
               AND (%(template)s::text IS NULL OR template_id = %(template)s)
+              AND (%(case)s::text IS NULL OR case_id = %(case)s)
               AND (%(all)s OR status <> 'destroyed')
             ORDER BY created_at DESC
             LIMIT %(limit)s
             """,
-            {"owner": owner, "status": status, "template": template_id, "all": include_destroyed, "limit": limit},
+            {"owner": owner, "status": status, "template": template_id, "case": case_id, "all": include_destroyed,
+             "limit": limit},
         )
 
     async def update_lab(
@@ -181,6 +194,11 @@ class Database:
             {"now": now},
         )
 
+    async def due_scheduled_labs(self, now: datetime) -> list[dict[str, Any]]:
+        return await self._all(
+            "SELECT * FROM labs WHERE status = 'scheduled' AND start_at <= %(now)s ORDER BY start_at", {"now": now}
+        )
+
     async def events(self, lab_id: UUID) -> list[dict[str, Any]]:
         return await self._all(
             "SELECT type, actor, at, details FROM lab_events WHERE lab_id = %(id)s ORDER BY at, id", {"id": lab_id}
@@ -209,7 +227,7 @@ class Database:
             """
             SELECT l.template_id,
               count(*) FILTER (WHERE l.created_at >= %(since)s)                       AS created,
-              count(*) FILTER (WHERE l.status NOT IN ('destroyed', 'destroy_failed')) AS active,
+              count(*) FILTER (WHERE l.status NOT IN ('destroyed', 'destroy_failed', 'scheduled')) AS active,
               count(*) FILTER (WHERE l.status = 'destroy_failed')                    AS needs_attention,
               count(*) FILTER (WHERE l.destroyed_at >= %(since)s)                    AS destroyed,
               count(*) FILTER (WHERE l.destroy_reason = 'expired' AND l.destroy_requested_at >= %(since)s) AS expired,
@@ -231,7 +249,7 @@ class Database:
             """
             SELECT owner_email,
               count(*) FILTER (WHERE created_at >= %(since)s) AS created,
-              count(*) FILTER (WHERE status NOT IN ('destroyed', 'destroy_failed')) AS active
+              count(*) FILTER (WHERE status NOT IN ('destroyed', 'destroy_failed', 'scheduled')) AS active
             FROM labs
             WHERE created_at >= %(since)s OR status <> 'destroyed'
             GROUP BY owner_email
@@ -241,10 +259,12 @@ class Database:
             params,
         )
         # Active: holds (or is creating) resources on purpose. destroy_failed labs
-        # are counted separately: their cleanup needs a person.
-        active = sum(n for s, n in by_status.items() if s not in ("destroyed", "destroy_failed"))
+        # are counted separately: their cleanup needs a person. Scheduled labs
+        # hold nothing until they start.
+        active = sum(n for s, n in by_status.items() if s not in ("destroyed", "destroy_failed", "scheduled"))
         return {
-            "active_labs": active, "needs_attention": by_status.get("destroy_failed", 0), "by_status": by_status,
+            "active_labs": active, "scheduled_labs": by_status.get("scheduled", 0),
+            "needs_attention": by_status.get("destroy_failed", 0), "by_status": by_status,
             **counts, "templates": templates, "top_owners": owners,
         }
 
@@ -273,30 +293,31 @@ class Database:
             )
 
     async def cost_lines(self, since: datetime, now: datetime) -> list[dict[str, Any]]:
-        """Per owner and template: labs, hours inside the window, and estimated cost.
+        """Per owner, template and case: labs, hours inside the window, and estimated cost.
 
-        Hours run from creation to destruction (or now), clipped to the window.
+        Hours run from the start (creation, or start_at for scheduled labs) to
+        destruction (or now), clipped to the window.
         Only labs that reached `ready` are charged; see the report's `method`.
         """
         return await self._all(
             """
             WITH clipped AS (
-              SELECT owner_email, template_id, hourly_cost, ready_at IS NOT NULL AS charged,
+              SELECT owner_email, template_id, case_id, hourly_cost, ready_at IS NOT NULL AS charged,
                 GREATEST(0, EXTRACT(EPOCH FROM
-                  LEAST(COALESCE(destroyed_at, %(now)s), %(now)s) - GREATEST(created_at, %(since)s)
+                  LEAST(COALESCE(destroyed_at, %(now)s), %(now)s) - GREATEST(COALESCE(start_at, created_at), %(since)s)
                 ) / 3600) AS hours
               FROM labs
               WHERE COALESCE(destroyed_at, %(now)s) >= %(since)s
             )
-            SELECT owner_email, template_id,
+            SELECT owner_email, template_id, case_id,
               count(*)::int                                                                  AS labs,
               round(sum(hours)::numeric, 2)::float8                                          AS lab_hours,
               round(sum(CASE WHEN charged THEN hours * COALESCE(hourly_cost, 0) ELSE 0 END)::numeric, 2)::float8
                                                                                              AS estimated_cost,
               count(*) FILTER (WHERE charged AND hourly_cost IS NULL)::int                   AS unpriced
             FROM clipped
-            GROUP BY owner_email, template_id
-            ORDER BY estimated_cost DESC, lab_hours DESC, owner_email, template_id
+            GROUP BY owner_email, template_id, case_id
+            ORDER BY estimated_cost DESC, lab_hours DESC, owner_email, template_id, case_id
             """,
             {"since": since, "now": now},
         )
